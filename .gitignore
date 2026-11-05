@@ -1,0 +1,12 @@
+.env
+.venv/
+.tools/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+data/
+*.db
+*.db-shm
+*.db-wal
+browser-traces/
+downloads/

@@ -1,0 +1,2 @@
+# Installs the package and the local browser/PDF extras from pyproject.toml.
+-e .[browser,pdf]
