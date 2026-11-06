@@ -5,11 +5,12 @@
 | Reviewer | Codex |
 | Tanggal | 6 November 2026 |
 | Baseline | [plan awal, commit 195b6a3](https://github.com/aryanattapt/takumi-research-agent-v0/blob/195b6a35a6a336a3a4ee48e40d610fb5f727362f/docs/planning/plan.md) |
-| Hasil revisi | [plan.md v1.1](plan.md) |
+| Hasil revisi | [plan.md v1.2](plan.md) |
+| Baseline review lanjutan | [commit 3561e23](https://github.com/aryanattapt/takumi-research-agent-v0/commit/3561e23092c9ae90e82eec17e7faf7e8d946b7b3) |
 | Metode | static self-review terhadap requirement, kontrak desain, failure scenarios, dan sumber primer. |
 | Batas | belum ada runtime agent/dashboard/publisher atau benchmark live yang dijalankan. |
 
-## 1. Kesimpulan
+## 1. Kesimpulan review pertama
 
 Plan awal mempunyai fondasi yang tepat: modular monolith, API/RSS-first, policy publish/draft, adapter tervalidasi, outbox, dan status unknown/partial. Pendekatan tersebut dipertahankan.
 
@@ -54,7 +55,7 @@ P0 harus diselesaikan sebelum automatic publish. P1 penting untuk reliabilitas b
 | R-15 | P2 | Risiko agent/publisher dibuktikan terlalu akhir. | Dashboard selesai sebelum loop/recovery layak. | 15–16: risk spike, persistent vertical slice, CI/eval sejak awal. |
 | R-16 | P2 | Runtime/framework dan dua browser belum memiliki batas keputusan. | Membuat framework sendiri atau control loop tumpang tindih. | 6.6: runtime kecil, spike/ADR, Playwright dahulu, Browser Use opsional. |
 
-Semua 16 temuan berstatus **ditangani pada desain, verifikasi runtime pending**.
+Semua 16 temuan berstatus **ditangani pada desain, verifikasi runtime pending**. Nomor bagian tabel di atas mengacu pada plan v1.1 di commit 3561e23; untuk pemetaan desain saat ini gunakan [traceability.md](traceability.md). Review lanjutan dicatat pada bagian 10.
 
 ## 4. Penjelasan temuan kritis
 
@@ -154,3 +155,51 @@ Untuk author utama Codex diperlukan jalur Git terautentikasi atau interface API 
 - [GitHub REST API — Git commits](https://docs.github.com/en/rest/git/commits#create-a-commit).
 
 Panduan vendor dipakai untuk prinsip yang relevan; plan tidak mewajibkan layanan managed agent atau platform evaluasi vendor.
+
+## 10. Review lanjutan — alur lintas komponen
+
+Baseline review kedua adalah plan v1.1. Metode review berfokus pada transisi yang saling berinteraksi: konfigurasi berubah, remote schedule sudah dibuat, satu bahasa berhasil, source berubah, dan backup tertinggal dari kondisi blog.
+
+Ditemukan sembilan gap tambahan. Plan v1.2 memperbaiki kontrak desainnya; tidak ada runtime test atau live publication yang diklaim dijalankan.
+
+| ID | Prioritas | Gap lintas komponen | Perbaikan pada plan v1.2 |
+| --- | --- | --- | --- |
+| RR-01 | P0 | Pause/approval invalidation lokal tidak otomatis menghentikan remote scheduled post. | 9.6, 11.6, 12.5: read/cancel capability, control intent terikat remote job, unknown cancellation, dan direct publish sebagai default. |
+| RR-02 | P0 | Outbox per bahasa dapat membuat dua resource pada API multilingual; satu enum hasil juga tidak cukup untuk published sekaligus late. | 9.7, 12.2, 12.4: unit fisik, operation identity, locale completeness, dan status/deadline terpisah. |
+| RR-03 | P1 | GET list dapat tidak memuat draft sendiri; retry EN bisa dianggap duplikat ID; draft lama belum punya alur promosi. | 10.9: internal ledger, pengecualian own-pair terbukti, dan rereview/promote existing draft. |
+| RR-04 | P1 | Base URL bisa berubah saat intent pending; edit operator/tab lama dapat tertimpa oleh snapshot. | 8.3, 12.5: destination epoch, config revision conflict, execution mode, dan remote conditional mutation. |
+| RR-05 | P1 | Retry SDK dapat bertumpuk dengan retry aplikasi; riset dapat menghabiskan budget writer/reviewer. | 13.1, 13.3–13.4: stop reason, satu pemilik retry, actual attempt accounting, dan stage reserves. |
+| RR-06 | P1 | Restore backup lama bisa lupa efek remote; referensi evidence dapat ada tanpa artifact yang valid. | 18.3: artifact hash/manifest, backup consistency, recovery mode, dan reconciliation sebelum aktivasi. |
+| RR-07 | P1 | Registry belum diwajibkan membuktikan akses empat bidang; research tool nonjurnal belum eksplisit. | 6.4, 10.5: primary-source search terdaftar, coverage full text per bidang, dan bootstrap domain policy. |
+| RR-08 | P2 | Belum ada pemetaan lengkap requirement ke desain dan acceptance, serta rubric awam yang operasional. | 17.4–17.5 dan traceability.md: seluruh 15 BR terpetakan, rubric, dan 51 skenario UAT. |
+| RR-09 | P1 | Sanitasi disebut untuk preview, belum tegas untuk body yang dipublish. | 10.8.1, 14: satu pipeline final untuk preview/payload, safe rendering, source links, serta invalidation setelah perubahan. |
+
+### Counterexample yang sekarang ditutup
+
+- Post sudah scheduled di blog, lalu profil dipause: jadwal perlu dicancel serta diverifikasi; menghentikan worker saja tidak cukup.
+- Mode single_resource menyimpan id/en bersama: satu create intent mencakup dua locale; retry EN tidak membuat resource kedua.
+- Indonesia sudah terbit tetapi English gagal: pemeriksaan akhir mengecualikan hanya ID own-pair yang terbukti, tanpa melonggarkan policy atau mengabaikan artikel lain.
+- Draft tidak muncul pada GET list: ledger internal tetap mengenalinya dan mencegah pembuatan draft baru setiap hari.
+- Jurnal baru mendukung draft lama: promosi memakai pair/resource yang sama setelah review baru, bukan copy artikel.
+- Restore snapshot sebelum POST sukses: mutation tetap ditahan sampai remote state diketahui; idempotency key kedaluwarsa tidak diperlakukan sebagai izin create ulang.
+- Operator mengedit remote draft setelah review: conditional version check memblokir publish isi yang belum direview.
+- API baru terkonfirmasi setelah 06:00: waktu terbit, waktu verifikasi, dan hasil deadline tidak disatukan menjadi satu status menyesatkan.
+
+### Pemeriksaan kelengkapan
+
+Semua BR-01 sampai BR-15 dipetakan ke desain, milestone, serta UAT pada traceability.md. UAT-33 sampai UAT-51 menambah skenario lintas komponen. Dokumen juga memisahkan keputusan pengguna, default teknis usulan, dan dependency eksternal.
+
+Kelengkapan ini terbatas pada requirement dan skenario yang direview. Hasilnya adalah **siap memulai risk spike**, bukan sertifikasi tanpa celah atau bukti aplikasi siap produksi.
+
+### Konten final
+
+Review juga memeriksa apakah payload yang dikirim sama dengan konten yang terlihat di dashboard. Sanitasi hanya pada preview tidak cukup jika raw body tetap dikirim ke blog. Plan menambahkan pipeline final bersama dan UAT-51; pendekatan output handling mengacu pada [OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html).
+
+### Dependency yang tetap terbuka secara eksplisit
+
+1. Kontrak/sandbox API blog nyata, termasuk kemampuan draft/publish/lookup/cancel/conditional update.
+2. Endpoint/model provider beserta limit dan hasil qualification.
+3. Resource deployment, latency envelope, dan budget aktual.
+4. Verifikasi runtime untuk setiap invariant, termasuk crash/retry/restore.
+
+SDK retry behavior diperiksa melalui [OpenAI Python SDK](https://github.com/openai/openai-python#retries) dan [Anthropic Python SDK](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python#retries). Konfigurasi konkret tetap harus diuji pada versi yang dipin.
