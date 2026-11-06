@@ -1,11 +1,16 @@
 # Takumi Research Agent — Product, Architecture, and Implementation Plan
 
-> Status: rencana implementasi; belum menyatakan fitur telah dibangun atau siap produksi.  
-> Pemilik produk: Arya / aryanattapt  
-> Tanggal: 6 November 2026  
-> Repository: [takumi-research-agent-v0](https://github.com/aryanattapt/takumi-research-agent-v0)  
-> Baseline yang ditinjau: commit `c8f588bd7a6b0bd0a0f5c4e386b9dd5665ecf656`.  
-> Bahasa dokumen: Indonesia. Bahasa artikel yang dihasilkan: Indonesia dan English.
+| Metadata | Nilai |
+| --- | --- |
+| Status | rencana implementasi; belum menyatakan fitur telah dibangun atau siap produksi. |
+| Pemilik produk | Arya / aryanattapt |
+| Penyusun dan reviewer | Codex |
+| Versi rencana | 1.1 — revisi setelah review mendalam |
+| Catatan review | [review.md](review.md) |
+| Tanggal | 6 November 2026 |
+| Repository | [takumi-research-agent-v0](https://github.com/aryanattapt/takumi-research-agent-v0) |
+| Baseline yang ditinjau | commit `c8f588bd7a6b0bd0a0f5c4e386b9dd5665ecf656`. |
+| Bahasa dokumen | Indonesia. Bahasa artikel yang dihasilkan: Indonesia dan English. |
 
 ## 1. Latar belakang
 
@@ -80,8 +85,11 @@ Default berikut merupakan keputusan rancangan awal untuk membuat implementasi ko
 | Delivery concurrency | Dua pekerjaan pengiriman aktif, terpisah dari kapasitas riset. |
 | Perbaikan output model | Maksimal dua percobaan perbaikan JSON atau editorial setelah respons awal. |
 | Evaluasi kandidat | Maksimal tiga kandidat utama per slot sebelum dilaporkan tidak ada topik layak. |
+| Agent loop | Maksimal 20 model turns dan 40 tool actions per run, dihitung bersama seluruh kandidat; berhenti lebih awal jika budget/deadline habis. |
+| Observasi tren | Polling ringan setiap 60 menit dengan cache; tidak memanggil model untuk setiap polling. |
 | Duplikasi lintas blog | Diperiksa per blog; topik yang sama di blog lain tidak otomatis dilarang. |
 | Deadline terlewat | Simpan hasil, tandai missed deadline, dan tahan pengiriman baru untuk slot tersebut. |
+| Aktivasi profil | Jadwal nonaktif saat profil baru dibuat; aktivasi memakai konfigurasi valid dan mode rollout yang terlihat. |
 | Pencarian berbayar | Nonaktif secara default. |
 | Embedding berbayar | Tidak wajib; deduplikasi dasar memakai indeks konsep dan pemeriksaan semantik model. |
 
@@ -179,6 +187,69 @@ Kode aplikasi bertanggung jawab atas autentikasi, validasi mapping, batas blog, 
 
 Output model selalu dianggap sebagai usulan terstruktur. AI tidak mendapat kemampuan menjalankan Python, JavaScript, SQL, shell, atau HTTP request bebas untuk menulis ke blog. Executor hanya menjalankan operasi dan transformasi yang diizinkan adapter.
 
+### 6.4 Runtime agent yang dituju
+
+Arsitektur yang dipilih adalah **agentic workflow**: satu research agent memilih langkah pencarian secara adaptif di dalam workflow aplikasi yang persisten. Tahap penulisan dan review memakai model dengan tugas berbeda; keduanya tidak otomatis menjadi agent otonom tambahan. Perbedaan antara jalur tetap dan pemilihan tools oleh model mengikuti [pembedaan workflow/agent Anthropic](https://www.anthropic.com/research/building-effective-agents).
+
+Agent mendapat goal, context, tools, dan budget. Setelah membaca observation, agent dapat mengubah query, memilih sumber lain, memeriksa paper yang bertentangan, atau menyimpulkan bukti tidak cukup. Menjalankan daftar prompt yang sama tanpa memperhatikan hasil tools belum memenuhi kriteria agent pada proyek ini.
+
+```mermaid
+flowchart TD
+    CTX["Goal, state, and budget"] --> PLAN["Choose next action"]
+    PLAN --> CHECK["Validate capability and limits"]
+    CHECK -->|"Allowed tool"| TOOL["Execute bounded tool"]
+    TOOL --> OBS["Store result and observation"]
+    OBS --> CTX
+    CHECK -->|"Finish request"| GATE["Validate evidence completeness"]
+    GATE -->|"Incomplete, budget remains"| CTX
+    GATE -->|"Complete or exhausted"| EXIT["Return bundle and gaps"]
+    CHECK -->|"Invalid or exhausted"| STOP["Stop with explicit reason"]
+```
+
+Harness memvalidasi setiap action menggunakan discriminated union: `tool_call` atau `finish`. Model tidak dapat menambahkan tool baru, memperluas scope blog, mengubah policy, atau menaikkan budget. Native tool calls dan fallback JSON diterjemahkan ke bentuk action internal yang sama.
+
+| Tool namespace | Input inti | Observation yang dikembalikan |
+| --- | --- | --- |
+| `literature.search` | Query, bidang, filter sumber/tanggal, page limit | Metadata kandidat, identifiers, dan status metadata tersedia/unknown. |
+| `sources.read` | Source ID atau URL yang lolos allowlist, section/cursor | Potongan teks, locator, hash versi sumber, scope yang dibaca, dan batas ekstraksi. |
+| `sources.check_status` | Identifier dan source version | Bukti status publikasi/review/koreksi/retraksi yang tersedia. |
+| `history.find_related` | Blog scope dari runtime, konsep, entity, dan query | Artikel pembanding beserta coverage/freshness dan retrieval metadata. |
+| `browser.read` | URL yang diizinkan dan tujuan pengambilan | Observation halaman, judul/URL final, timestamp, dan extraction quality. |
+| `evidence.record` | Claim, source version, locator, dan evidence span | Evidence ID jika span dapat diverifikasi pada artifact sumber. |
+| `research.finish` | Research summary, claims, evidence IDs, dan unresolved gaps | Bundle tervalidasi atau daftar kekurangan yang masih perlu ditangani. |
+
+`evidence.record` hanya menulis bukti lokal tervalidasi, dengan key idempotent. Tidak ada tool research untuk create/publish/update/delete post, menjalankan shell, membaca secret, atau mengakses database bebas.
+
+Setiap tool mempunyai JSON Schema input/output, contoh penggunaan, scope, timeout, output limit, cost estimate bila tersedia, dan error code. Error seperti `AUTH_FAILED`, `RATE_LIMITED`, `NOT_FOUND`, `EXTRACTION_INCOMPLETE`, atau `BLOCKED_URL` tidak dikembalikan sebagai teks yang menyerupai hasil riset sukses. Field `truncated`, `next_cursor`, dan `retry_after` harus eksplisit.
+
+Stop conditions: bukti cukup; tidak ada kandidat layak; budget langkah/token/waktu habis; sumber penting unavailable; atau tidak ada progres setelah dua observation identik. Finish adalah permintaan model yang dinilai controller, bukan pernyataan keberhasilan yang langsung dipercaya.
+
+**Contoh penerimaan agent:** ketika full text pertama tidak tersedia, agent mencari jalur open-access lain; ketika hasil kedua membantah klaim awal, agent memperbarui fact sheet atau menolak klaim. Test harus menunjukkan observation mengubah pilihan action, bukan hanya melihat sebuah tool pernah dipanggil.
+
+### 6.5 Context, memory, dan replay
+
+| Jenis state | Penyimpanan dan batas |
+| --- | --- |
+| Working memory | Goal, pertanyaan terbuka, evidence IDs, ringkasan observation, dan budget dalam run checkpoint. |
+| Source memory | Artifact immutable dengan content hash; excerpt diambil sesuai kebutuhan, bukan seluruh paper dimasukkan ke setiap prompt. |
+| Blog memory | Indeks konsep, history, serta keputusan terdahulu yang scoped per blog. |
+| Configuration memory | Snapshot berversi; secret tetap berupa reference dan tidak disisipkan ke context. |
+| Evaluation memory | Dataset dan trace regression berversi, terpisah dari memory operasional yang dapat berubah. |
+
+Bangun context pada setiap turn: instruksi stabil, tool registry yang diizinkan, snapshot fakta terpilih, evidence relevan, pertanyaan terbuka, serta sisa budget. Sisakan ruang untuk hasil tool dan output. Compaction menyimpan ID sumber, locator, fakta, dan kekurangan; ringkasan model tidak menggantikan bukti asli.
+
+Checkpoint mencatat tool intent sebelum eksekusi dan hasil setelah eksekusi. Read boleh diulang sesuai cache/freshness; effect lokal harus idempotent. Replay test memakai observation/model response yang direkam dan disensor untuk memeriksa transisi state, bukan menjanjikan respons model live identik.
+
+Trace berisi action, argumen tersensor, observation reference, keputusan ringkas, versi prompt/model/tool, durasi, dan usage. Tidak meminta atau menyimpan hidden chain-of-thought model. Restart tidak boleh menghapus daftar bukti yang belum terjawab atau mengulang mutation remote.
+
+### 6.6 Pilihan framework dan kompleksitas
+
+Mulai dengan AgentRuntime bertipe melalui provider SDK, explicit state machine, dan checkpoint aplikasi. Durable queue, policy, serta delivery tetap berada di aplikasi. Framework agent bukan syarat agar sistem memenuhi definisi agent.
+
+Compatibility spike harus membuktikan tool calling, fallback JSON, pause/resume, replay, serta budget enforcement. Jika kebutuhan graph/interrupt/replay sulit dipenuhi dengan runtime kecil, buat ADR untuk mengadopsi framework; jangan membangun framework umum baru di dalam proyek ini.
+
+Browser Use merupakan evaluasi opsional setelah jalur Playwright berfungsi. Tidak menjalankan dua control loop browser sekaligus. Multi-agent swarm dan MCP server tidak menjadi dependensi default; penambahannya membutuhkan masalah terukur yang belum diselesaikan desain ini.
+
 ## 7. Tech stack yang direncanakan
 
 Versi patch dan lockfile ditetapkan setelah compatibility spike. Tidak menaikkan semua dependensi ke versi terbaru tanpa pengujian.
@@ -188,6 +259,7 @@ Versi patch dan lockfile ditetapkan setelah compatibility spike. Tidak menaikkan
 | Backend | Python 3.12 dengan minimum repository 3.11 dievaluasi saat spike | Melanjutkan fondasi Python yang sudah ada. |
 | Web API | FastAPI + Uvicorn | API dashboard dan kontrak bertipe. |
 | Validasi | Pydantic 2.x | Validasi konfigurasi, mapping, output model, dan state. |
+| Agent harness | AgentRuntime bertipe, explicit state machine, checkpoint PostgreSQL | Loop observation/action yang dibatasi dan dapat diuji; framework tambahan melalui ADR jika spike membutuhkannya. |
 | HTTP | httpx | Request asynchronous, timeout, transport fixture, dan pembatasan koneksi. |
 | Model OpenAI-compatible | Official OpenAI Python SDK melalui adapter aplikasi | Baseline Chat Completions; fitur khusus provider diuji sebelum diaktifkan. |
 | Model Anthropic | Official Anthropic Python SDK melalui adapter aplikasi | Menggunakan protokol native Messages; tidak dipaksa menjadi request OpenAI. |
@@ -218,6 +290,7 @@ Redis tidak menjadi dependensi awal. Klaim job menggunakan transaction singkat d
 | Blog profiles | Tambah/edit/pause profil sampai 10, nama, base URL, autentikasi, cakupan topik, dan model override. |
 | API adapter | Import OpenAPI atau sampel, konfigurasi endpoint, infer mapping, preview normalisasi, dan read-only connection test. |
 | Models | Provider type, base URL, model ID, API key, timeout, token limit, capability test, serta default provider. |
+| Evaluations | Dataset/version, hasil regression, trace yang gagal, kelayakan automatic publish, dan estimasi biaya sebelum live evaluation. |
 | Schedule & topics | Daily/hari tertentu, timezone, jam target publikasi, lead time, kuota, kategori, jendela tren, dan prioritas. |
 | Sources | RSS/API/domain sumber, status konektor, batas request, browser fallback, dan konfigurasi kredensial opsional. |
 | Editorial | Panjang tulisan, gaya bahasa, profil pembaca, kategori/tag, SEO, format body, dan kebijakan sumber. |
@@ -316,6 +389,10 @@ Default pengiriman tetap dua post terpisah. Bila API menyimpan seluruh bahasa da
 
 Model tidak menghasilkan program yang kemudian dieksekusi dengan eval. Missing value harus tetap dibedakan dari null, string kosong, angka nol, dan false.
 
+Parser OpenAPI membatasi ukuran dokumen, kedalaman nesting, jumlah referensi, dan waktu validasi. YAML memakai safe loader dan batas alias. Referensi eksternal hanya dibaca dari origin yang diizinkan setelah pemeriksaan URL; tidak membawa header autentikasi ke origin lain. OpenAPI 3.0 dan 3.1 perlu fixture terpisah karena aturan schema berbeda.
+
+Tool description, OpenAPI description, raw JSON, isi blog, dan halaman web adalah input tidak tepercaya. Teks tersebut tidak ditempatkan sebagai system/developer instruction. Valid JSON tetap bisa membawa instruksi berbahaya; pembatasan schema harus dipadukan dengan capability dan authorization executor.
+
 ### 9.5 Perubahan schema
 
 - Simpan fingerprint struktur response dan versi mapping.
@@ -332,6 +409,21 @@ Model tidak menghasilkan program yang kemudian dieksekusi dengan eval. Missing v
 Setiap profil mencatat kemampuan `list`, `detail`, `create_draft`, `publish`, `update`, `schedule`, `lookup_delivery`, `idempotency_key`, dan `translation_link`.
 
 Kemampuan yang tidak terbukti dianggap unavailable. Jika API tidak menyediakan operasi draft yang aman, hasil tanpa dukungan jurnal disimpan sebagai draft lokal dan tidak dikirim melalui endpoint yang otomatis mempublish.
+
+### 9.7 Sinkronisasi history yang dapat diselesaikan
+
+Full backfill dilakukan pada onboarding atau saat mapping inti berubah, bukan otomatis membaca ulang seluruh arsip setiap hari. Pipeline harian menggunakan delta sejak watermark yang berhasil dikomit, overlap waktu, dan upsert menurut remote ID serta bahasa.
+
+- Gunakan ordering dan snapshot/watermark dari API jika didukung.
+- Jangan memajukan watermark atau mengganti snapshot valid saat hanya sebagian halaman berhasil.
+- Deduplicate halaman yang overlap; deteksi pengulangan cursor dan batas halaman.
+- Ambil ulang detail jika content hash atau remote updated_at berubah.
+- Tangani artikel yang dihapus hanya melalui tombstone atau full comparison yang memang dapat dipercaya.
+- Jika API tidak menyediakan delta, gunakan bounded refresh dan jelaskan coverage; initial backfill yang belum selesai tidak dianggap lengkap.
+- Lakukan pemeriksaan akhir tepat sebelum delivery menggunakan kemampuan lookup/search/list yang telah dibuktikan.
+- Uji penambahan artikel di antara dua halaman agar feed yang berubah tidak menyebabkan kehilangan record diam-diam.
+
+Cache raw sumber publik boleh dibagi. History private/draft, indeks konsep blog, prompt cache berisi history, dan keputusan duplikasi tidak dibagi antarprofil. Cache key memasukkan scope, content/config/prompt version, serta model saat relevan. Ringkasan konsep yang usang harus diindeks ulang; tidak boleh menjadi satu-satunya bukti topik sudah atau belum dibahas.
 
 ## 10. Alur AI agent
 
@@ -367,7 +459,7 @@ Setelah kandidat ditolak, orchestrator boleh memilih kandidat berikutnya sampai 
 | Discover | Ambil sinyal baru dari konektor trend. | Candidate pool dengan asal dan waktu pengamatan. |
 | Rank | Nilai hype, recency, relevansi, dan keragaman sumber. | Kandidat berurutan dan penjelasan skor. |
 | Deduplicate | Bandingkan kandidat dengan history dan reservasi topik run lain. | Verdict serta artikel pembanding. |
-| Research plan | Pecah pertanyaan riset dan tentukan bukti yang dibutuhkan. | Query plan dan batas pengambilan sumber. |
+| Research plan | Pecah pertanyaan riset, lalu jalankan loop agent adaptif sesuai observation. | Query/action trace, pertanyaan terbuka, dan batas pengambilan sumber. |
 | Retrieve/read | Ambil metadata, full text terbuka, atau halaman primer. | SourceRecord dan evidence spans. |
 | Evidence review | Periksa identitas sumber, status riset, dukungan klaim, dan konflik. | Evidence assessment dan daftar fakta yang boleh dipakai. |
 | Outline | Susun pertanyaan pembaca, alur cerita, dan analogi. | Outline bersama kedua bahasa. |
@@ -390,7 +482,9 @@ Sumber awal yang direncanakan:
 | Literatur | Crossref, Europe PMC, arXiv, dan konektor sumber terbuka relevan | Penemuan bukti; bukan ukuran hype tunggal. |
 | Konfigurasi pengguna | RSS dan domain tambahan yang disetujui | Penyesuaian cakupan per blog. |
 
-Formula awal, untuk dikalibrasi menggunakan hasil nyata:
+Polling sinyal berjalan sebagai pekerjaan ringan bersama setiap 60 menit, terpisah dari run penulisan harian. Gunakan ETag/Last-Modified jika tersedia, per-source rate limit, dan raw metric snapshots; tidak menjalankan LLM pada setiap polling. Saat collector mati atau baru diaktifkan, jendela observasi ditandai incomplete.
+
+Formula berikut adalah **heuristik awal proyek**, bukan formula hype yang sudah terbukti atau standar industri. Kalibrasi terhadap contoh ranking yang diberi label sebelum mengklaim topik yang dipilih mewakili tren global:
 
 ```text
 hype_score =
@@ -443,7 +537,7 @@ Browser mempunyai batas domain, ukuran unduhan, durasi, dan jumlah langkah. Teks
 | distinct | Boleh lanjut. |
 | uncertain | Tahan kandidat sampai bukti pembanding cukup; tidak otomatis dianggap unik. |
 
-Artikel Indonesia dan English dari satu pasangan diperlakukan sebagai satu topik. Kemiripan DOI merupakan sinyal, bukan satu-satunya penentu: satu paper bisa mendukung beberapa pertanyaan berbeda. Ambang similarity diuji terhadap fixture; tidak mengandalkan angka generik tanpa kalibrasi.
+Artikel Indonesia dan English dari satu pasangan diperlakukan sebagai satu topik. Kemiripan DOI merupakan sinyal, bukan satu-satunya penentu: satu paper bisa mendukung beberapa pertanyaan berbeda. Ambang similarity diuji terhadap fixture; tidak mengandalkan angka generik tanpa kalibrasi. Recall shortlist diuji dengan distractor yang cukup dan ukuran arsip menyerupai deployment. Jika recall gagal, perbaiki query expansion/index atau evaluasi embedding multilingual lokal opsional; LLM tidak bisa memeriksa artikel yang tidak pernah masuk shortlist.
 
 Jika riwayat tidak dapat disinkronkan secara memadai, run diblokir untuk pengiriman eksternal. Snapshot lama boleh membantu pemulihan, tetapi harus jelas batas cakupan dan freshness-nya.
 
@@ -469,9 +563,35 @@ Pengutamaan peer review mengikuti kebutuhan pengguna. Default automatic publish 
 
 Jika sumber jurnal mendukung sebagian isi tetapi klaim utama hanya spekulasi dari pengumuman lain, artikel tidak otomatis mendapat verdict publish.
 
+### 10.6.1 Evidence contract dan pemeriksaan klaim
+
+Source ID yang valid hanya membuktikan sebuah record ada; belum membuktikan kalimat artikel didukung record tersebut.
+
+Setiap klaim material menyimpan:
+
+| Field | Makna |
+| --- | --- |
+| `claim_id / claim_text` | Pernyataan spesifik yang diperiksa, bukan paragraf dengan banyak klaim tersembunyi. |
+| `claim_type` | Temuan eksperimen, angka, mekanisme, interpretasi, prediksi, atau klaim produk yang diatribusikan. |
+| `source_id / source_version` | Identifier dan hash artifact yang benar-benar dipakai. |
+| `locator / evidence_span` | Section/page/table/offset dan kutipan pendek yang dapat dicocokkan ke artifact. |
+| `support_verdict` | Supported, contradicted, atau insufficient; bukan confidence angka dari model. |
+| `limitations` | Populasi/konteks eksperimen, waktu, batas generalisasi, dan gap yang belum terjawab. |
+| `verification_method` | Check deterministik, metadata primer, penilaian semantik dengan rubric, atau pemeriksaan operator. |
+
+Controller memastikan evidence span benar-benar ada pada versi sumber setelah normalisasi yang ditetapkan. Reviewer memeriksa apakah konteks tersebut mendukung klaim, bukan hanya cocok kata kunci. Periksa negasi, satuan, sample size, korelasi vs kausalitas, dan perbedaan hasil eksperimen dengan prediksi.
+
+Bedakan full text tersedia, artifact berhasil diunduh, section berhasil diekstrak, dan section yang benar-benar masuk context agent. Tidak boleh mencatat full paper reviewed jika hanya abstrak atau beberapa excerpt yang dibaca. Bukti numerik dari PDF/table yang ekstraksinya rusak tidak lolos otomatis.
+
+Klaim inti yang insufficient atau contradicted dihapus/diperbaiki atau menyebabkan hold/skip. Draft tetap harus merupakan konten yang dapat dipertanggungjawabkan; label draft bukan tempat membuang klaim yang diketahui salah. Satu penelitian baru tetap dijelaskan sebagai satu penelitian; berita salinan bukan replikasi independen.
+
 ### 10.7 Penulisan Indonesia dan English
 
 Kedua versi berasal dari satu fact sheet dan outline. English bukan terjemahan kata per kata; urutan fakta dan tingkat kepastian harus tetap sama.
+
+Reviewer memperoleh artikel dan evidence yang relevan dalam context baru, tanpa membawa alasan pembenaran penulis sebagai ground truth. Pemeriksaan angka, identifier, span, dan referensi dilakukan secara deterministik bila memungkinkan; penilaian semantik model dipadukan dengan rubric dan dataset berlabel. Menggunakan model yang sama pada context baru tetap berisiko mengulang bias yang sama. Provider reviewer lain bersifat opsional, bukan jaminan kebenaran atau biaya tambahan wajib.
+
+Reviewer boleh meminta riset tambahan dalam budget run yang sama. Penambahan klaim atau revisi substansial membatalkan keputusan publikasi sebelumnya dan harus melewati pemeriksaan lagi.
 
 Struktur editorial awal:
 
@@ -486,6 +606,12 @@ Struktur editorial awal:
 Pemeriksaan mencakup angka, satuan, tanggal, besaran efek, atribusi, sumber, ketepatan analogi, dan kesetaraan klaim. Hasil pada sel/hewan, eksperimen laboratorium, dan penerapan di dunia nyata tidak boleh ditulis seolah setara. Klaim produk dari vendor tetap diberi atribusi.
 
 Metadata SEO, excerpt, slug, tag, serta kategori disusun dari isi. Jika kategori/author memerlukan ID remote, adapter memakai konfigurasi atau lookup yang valid; model tidak mengarang ID.
+
+### 10.8 Perubahan bukti setelah artikel disiapkan atau terbit
+
+Sebelum pengiriman, periksa status sumber penting lagi dalam batas freshness yang dikonfigurasi. Perubahan evidence, koreksi, atau retraksi membatalkan approval yang terkait.
+
+Jika perubahan tersebut ditemukan setelah artikel terbit, dashboard menandai artikel needs_review dan menyiapkan usulan koreksi sebagai draft berversi. Jangan menyembunyikan perubahan dengan menimpa riwayat atau menghapus post otomatis. Versi pertama menyediakan audit dan alur koreksi ketika perubahan terdeteksi pada pembacaan berikutnya; pemantauan berkelanjutan seluruh literatur bukan kemampuan yang dijanjikan.
 
 ## 11. Penjadwalan berdasarkan waktu sudah terbit
 
@@ -514,7 +640,7 @@ Untuk verdict draft, target waktu diukur sebagai kedua draft remote berhasil ter
 ### 11.3 Aturan operasional
 
 - Semua timestamp operasional disimpan dalam UTC dan ditampilkan sesuai timezone blog.
-- Slot mempunyai identitas blog, waktu target UTC, ordinal kuota, dan versi jadwal.
+- Ledger slot memakai blog, editorial date, dan ordinal kuota yang stabil. Waktu target UTC serta versi jadwal adalah metadata occurrence, bukan alasan membuat jatah baru.
 - Database mencegah scheduler restart menghasilkan slot ganda.
 - Scheduler tidak ditanam di setiap process Uvicorn.
 - Antrean delivery mendapat kapasitas terpisah agar tidak tertahan oleh riset panjang.
@@ -526,7 +652,17 @@ Untuk verdict draft, target waktu diukur sebagai kedua draft remote berhasil ter
 - Tidak menurunkan standar bukti agar memenuhi waktu.
 - Tidak menandai scheduled, accepted, atau HTTP 200 sebagai published tanpa hasil remote yang sesuai.
 
-### 11.4 Kapasitas 10 blog
+### 11.4 Admission control dan perubahan jadwal
+
+Lead time dihitung dari antrean seluruh blog, bukan p95 satu riset dikalikan asumsi bahwa semua job dapat paralel. Estimasi memperhatikan research concurrency, browser bottleneck, provider RPM/TPM, retrieval, serta p95 delivery dan verification.
+
+Coordinator memakai earliest-deadline-first dengan pembagian kapasitas antarblog. Polling tren dan backfill besar mempunyai prioritas di bawah delivery. Provider rate limiter dibagi oleh seluruh blog yang menggunakan credential/provider sama. Jika beban tidak dapat masuk sebelum deadline, tampilkan slot at_risk dan mulai persiapan lebih awal bila masih mungkin; jangan mengirim pekerjaan tanpa batas ke provider.
+
+Perubahan jam/timezone/kuota tidak menciptakan hak terbit baru untuk hari yang sama. Gunakan ledger kuota harian yang stabil; simpan target waktu dan schedule version pada run. Perubahan jadwal berlaku untuk slot pending yang bisa direvisi aman atau occurrence berikutnya. Slot yang sudah mempunyai delivery sukses/unknown tetap dikunci sampai direkonsiliasi.
+
+Run manual default dry-run. Mode delivery eksplisit tetap melalui policy, budget, dan ledger slot; bukan jalan pintas untuk mengirim topik tanpa jurnal sebagai published.
+
+### 11.5 Kapasitas 10 blog
 
 Gunakan discovery cache bersama dan reuse sumber yang sama jika relevan, tetapi history, keputusan duplikasi, konfigurasi, kuota, dan delivery tetap terisolasi per blog.
 
@@ -579,17 +715,23 @@ Hasil akhir dibedakan menjadi published, drafted_remote, drafted_local, skipped,
 - Worker yang restart melanjutkan checkpoint; tidak selalu memulai riset dari awal.
 - File lock global existing diganti lease database.
 - Run tidak memegang transaction selama panggilan LLM, browser, atau API eksternal.
+- Setiap klaim ulang menaikkan `lease_epoch` sebagai fencing token. Update checkpoint/outbox memakai compare-and-set terhadap owner, epoch, dan state version; hasil worker lama ditolak.
+- Sebelum mutation, periksa lagi lease, profil aktif, policy, dan fingerprint approval dalam transaction singkat.
 - Jika lease mutation kedaluwarsa, worker berikutnya masuk rekonsiliasi sebelum membuat request lain.
-- Config edit atau pause diperiksa pada batas stage sebelum efek eksternal.
+- Lease/fencing lokal tidak dapat membatalkan HTTP request yang sudah in-flight. Remote idempotency atau reconciliation tetap diperlukan; ini bukan jaminan exactly-once.
+- Config edit, credential revocation, pause, atau kill switch diperiksa pada batas stage dan sebelum mutation. Snapshot lama tidak memberikan izin mengabaikan pencabutan akses.
 
 ### 12.4 Idempotency dan outbox
 
 ```text
-run_key = hash(blog_id, scheduled_target_utc, quota_ordinal)
+quota_slot_key = hash(blog_id, editorial_date, quota_ordinal)
+run_key = quota_slot_key
 delivery_key = hash(blog_id, article_pair_id, language, action)
 ```
 
+- Unique constraint pada blog, editorial_date, dan quota ordinal mencegah jadwal yang diedit atau dua scheduler menghasilkan jatah harian ganda. Editorial date dan timezone dibekukan pada occurrence; perubahan timezone tidak mengubah slot yang sudah dimulai.
 - Unique constraint mencegah dua outbox intent untuk operasi logis yang sama.
+- Article pair dikunci pada slot setelah delivery dimulai. Hasil unknown tidak boleh diatasi dengan memilih kandidat baru lalu mengirim pasangan baru pada slot yang sama.
 - Payload final disimpan sebelum network call dan tetap sama saat retry intent itu.
 - Header idempotency hanya digunakan jika API memang mendukungnya.
 - Attempt, response, dan remote ID dicatat terpisah dari intent.
@@ -599,7 +741,15 @@ delivery_key = hash(blog_id, article_pair_id, language, action)
 - Delivery yang sudah sukses tidak dikirim ulang ketika hanya bahasa lain yang gagal.
 - Jangan menghapus versi yang sudah terbit sebagai kompensasi otomatis.
 
-### 12.5 Migrasi existing SQLite
+### 12.5 Approval yang terikat pada konten
+
+Policy menghasilkan approval record dengan fingerprint atas article versions, evidence versions, review result, decision, adapter version, konfigurasi editorial, jadwal, dan payload final yang telah dirender. Secret tidak masuk fingerprint atau artifact; hanya credential reference/version dan capability yang dibutuhkan.
+
+Publisher hanya menerima intent yang sesuai fingerprint approval dan keadaan akses terkini. Perubahan judul/body, sumber, mapping status, atau target setelah review membatalkan approval dan memerlukan validasi ulang. Persetujuan untuk draft tidak dapat dipakai untuk aksi publish.
+
+HTTP status, remote operation status, remote post status, dan status pasangan artikel merupakan state yang terpisah. Retry mengulangi intent yang sama, bukan meminta model membuat payload baru secara spontan.
+
+### 12.6 Migrasi existing SQLite
 
 1. Backup database existing dan pertahankan file aslinya.
 2. Buat schema PostgreSQL melalui migrasi berversi.
@@ -642,6 +792,19 @@ Structured output memakai JSON Schema/tool calling ketika tersedia, atau JSON ya
 - Fallback provider hanya digunakan jika sudah dikonfigurasi, termasuk budgetnya.
 - Request pricing dan rate limit mengikuti provider yang dipilih pada saat deployment; dokumen ini tidak mengunci harga.
 
+Budget diperiksa dan direservasi secara atomik sebelum request, termasuk request dari blog lain yang berbagi provider. Usage aktual merekonsiliasi reservasi; usage yang tidak tersedia memakai estimasi konservatif dan label unknown. Batas USD berdasarkan harga/input yang dikonfigurasi merupakan estimasi aplikasi; hard spending limit di provider tetap mekanisme terpisah.
+
+Error handling memakai klasifikasi berikut:
+
+| Kondisi | Perilaku |
+| --- | --- |
+| GET timeout/429/5xx | Retry terbatas dengan jitter dan Retry-After selama budget masih cukup. |
+| Auth failure | Tahan profil/provider terkait; jangan membanjiri seluruh jadwal dengan kredensial yang sama. |
+| Invalid model output | Repair terbatas; tidak beralih ke parsing bebas atau menerima field wajib yang hilang. |
+| POST dengan kemungkinan efek remote | Masuk reconciliation; status 5xx sendiri tidak membuktikan tidak ada post yang dibuat. |
+| Source berulang kali gagal | Circuit breaker sementara; lanjut sumber alternatif jika bukti tetap cukup. |
+| Provider fallback | Hanya ke profil yang diizinkan dan lolos evaluasi untuk role tersebut; catat perubahan model. |
+
 ### 13.3 Resource awal
 
 Mulai dengan satu host Docker dan inference melalui API yang dikonfigurasi. Kebutuhan CPU/RAM belum menjadi angka terjamin; ukur saat spike dengan browser dan dua run aktif. Menggunakan model lokal menambah kebutuhan hardware di luar baseline aplikasi.
@@ -661,7 +824,10 @@ Keamanan berikut merupakan bagian dari dashboard yang menyimpan credential dan m
 - Redirect dan referensi schema eksternal diperiksa kembali; credential tidak diteruskan ke origin berbeda.
 - Browser retrieval tidak memiliki credential dashboard/provider dan tidak diizinkan menulis ke API blog.
 - Konten HTML/Markdown disanitasi saat preview untuk mencegah stored XSS.
+- Source text, history blog, dan deskripsi OpenAPI tidak mendapat posisi system/developer instruction.
+- Schema-valid JSON bukan bukti bebas prompt injection. Authorization, scoped tool registry, URL policy, sanitasi, dan adversarial eval tetap berjalan.
 - Source text tidak dapat mengganti system instructions, publication policy, atau batas tools.
+- Kill switch global/per-blog menghentikan mutation baru pada batas aman; pekerjaan in-flight ditandai untuk rekonsiliasi, bukan dilaporkan batal tanpa bukti.
 - Endpoint test model memberi tahu bahwa test melakukan request model dan dapat memakai token.
 - Backup mencakup database dan artifact penting; master key dikelola terpisah agar backup terenkripsi tetap bisa dipulihkan.
 - Pembaruan dependensi mengikuti build dan regression checks.
@@ -672,20 +838,22 @@ Keamanan berikut merupakan bagian dari dashboard yang menyimpan credential dan m
 
 Bangun vertical slice dengan fixture sebelum integrasi blog nyata. Dahulukan kontrak domain, policy, dan reliabilitas; dashboard kemudian menggunakan kontrak yang sama. Jangan memulai dengan demo UI yang menyatakan job berhasil tanpa pipeline nyata.
 
+Spike pertama harus membuktikan loop adaptif dan alur kecil dari sumber fixture sampai fake blog, termasuk timeout. Dataset serta CI dimulai pada tahap ini, sebelum dashboard lengkap. Controller dan tools yang lolos vertical slice kemudian diperluas.
+
 Semua milestone mengacu pada kebutuhan BR di bagian 3. Status rencana tidak dianggap selesai hanya karena file/modul telah dibuat.
 
 ### 15.2 Milestone
 
 | Milestone | Fokus | Hasil dan kriteria keluar |
 | --- | --- | --- |
-| M0 — Baseline dan spike | Dependency/model/browser fit, fixture API, dan keputusan kontrak. | OpenAI-compatible dan Anthropic dapat menghasilkan output tervalidasi; browser membaca satu sumber terbuka; batas integrasi tercatat. |
-| M1 — Fondasi aplikasi | PostgreSQL, migrasi, admin auth, konfigurasi, dan audit. | Profil ke-11 ditolak server; secret tidak muncul di response; import SQLite diuji. |
-| M2 — Dashboard dan adapter | Form konfigurasi serta pemahaman beberapa struktur blog. | Onboarding fixture blog dengan bentuk berbeda tanpa edit kode adapter per fixture. |
-| M3 — History dan trend | Pagination, indeks lintas bahasa, source connectors, dan ranking. | Deduplikasi diuji; sumber tren memiliki asal, waktu, serta skor yang dapat dijelaskan. |
-| M4 — Research dan editorial | Evidence retrieval, fact sheet, dua bahasa, serta reviewer. | Kandidat menghasilkan dua artikel dengan bukti yang terlacak; sumber lemah tidak lolos publish. |
-| M5 — Delivery dan policy | Publish/draft rule, outbox, status per bahasa, dan reconciliation. | Simulasi timeout/partial failure tidak membuat post ganda atau sukses palsu. |
-| M6 — Deadline scheduler | Slot target terbit, recovery, fairness, dan batas concurrency. | Uji 10 blog pada slot sama; missed deadline terlihat dan tidak memaksa konten terbit. |
-| M7 — Deployment dan UAT | Compose, backup/restore, contract blog nyata, serta operasi. | End-to-end pada sandbox API nyata lolos sebelum fitur dijadwalkan pada blog produksi. |
+| M0 — Risk spike dan eval baseline | Typed agent loop, dua protokol provider, browser, fake blog, dan gold cases awal. | Observation mengubah action; tool tanpa izin ditolak; source-to-claim dapat diperiksa; timeout create masuk unknown/reconciliation pada prototype. |
+| M1 — Fondasi durabel | PostgreSQL, migrasi, quota ledger, lease/fencing, config snapshot, auth, dan secret storage. | Constraints dan stale worker rejection terbukti; profil ke-11 ditolak; migrasi existing diuji jika ada data. |
+| M2 — Vertical slice persisten | Fixture history/trend sampai research, bilingual draft, policy, outbox, dan fake blog. | Restart/retry tidak mengulang hasil sukses; trace/evidence dapat diperiksa tanpa UI lengkap. |
+| M3 — Dashboard dan adapter | Onboarding, settings, jadwal, dan mapping API. | Fixture blog berbeda terkonfigurasi tanpa edit kode per blog; mapping invalid memblokir mutation. |
+| M4 — Discovery dan history nyata | Collector, connectors, backfill/delta, indeks, dan dedup. | Coverage terlihat; ranking berlabel heuristik; retrieval recall dan duplikasi diukur. |
+| M5 — Research/editorial qualification | Evidence contract, kritik terpisah, bahasa, dan eval nondeterministik. | Release gates bagian 17.3 lolos pada versi model/prompt/tools tercatat, bukan dari test parsing saja. |
+| M6 — Deadline dan kapasitas | Admission control, shared limits, delivery priority, 10 blog, dan fault injection. | Latency envelope diketahui; schedule edit tidak menggandakan kuota; deadline/partial/unknown jujur. |
+| M7 — Deployment, UAT, dan rollout | Compose, restore, sandbox API pengguna, shadow run, dan pilot. | Kontrak nyata serta recovery lolos; skala dinaikkan dari satu blog sampai 10 berdasarkan metrik. |
 
 ### 15.3 Dependency dan blocker
 
@@ -724,25 +892,32 @@ Tabel ini adalah struktur yang diusulkan; belum menyatakan direktori tersebut su
 
 | Urutan | Paket pekerjaan | Deliverable | Dependensi |
 | --- | --- | --- | --- |
-| IP-01 | Dokumentasi requirement dan desain | plan.md dalam folder planning | Permintaan pengguna saat ini. |
-| IP-02 | Compatibility spike | Hasil probe, dependency lock, interface provider, dan fixture contracts | IP-01. |
-| IP-03 | Domain/persistence | Model multi-blog, migration schema, SQLite import, job/outbox constraints | IP-02. |
-| IP-04 | Control API dan auth | CRUD konfigurasi, max-10 enforcement, secret management, run query | IP-03. |
-| IP-05 | Dashboard dasar | Overview, model settings, profil blog, jadwal, connection test | IP-04. |
-| IP-06 | Dynamic blog adapter | OpenAPI/samples, mapping inference, validator, capabilities, payload preview | IP-02, IP-04. |
-| IP-07 | History/dedup | Sync per blog, pagination, canonical indexing, semantic verdict, topic reservation | IP-03, IP-06. |
-| IP-08 | Trend discovery | RSS/API connectors, observations, scoring, candidate pool | IP-02, IP-03. |
-| IP-09 | Research engine | Sumber jurnal/nonjurnal, extraction, evidence spans, credibility assessment | IP-07, IP-08. |
-| IP-10 | Bilingual editorial | Fact sheet, outline, dua versi, review, revision limits, policy decision | IP-09. |
-| IP-11 | Publisher dan reconciliation | Outbox per bahasa, draft/publish rendering, timeout/partial handling | IP-06, IP-10. |
-| IP-12 | Scheduler/worker runtime | Target-based preparation, priority delivery, lease recovery, resource budget | IP-03, IP-11. |
-| IP-13 | Dashboard operasional | Evidence view, stage/progress, delivery state, unknown/missed handling | IP-10 sampai IP-12. |
-| IP-14 | CI dan deployment | Backend/frontend checks, image build, Compose, backup/restore guide | Paket yang sudah terintegrasi. |
-| IP-15 | Contract integration/UAT | Adapter untuk API nyata melalui konfigurasi, benchmark 10 blog, release checklist | IP-14 dan kontrak API pengguna. |
+| IP-01 | Dokumentasi desain dan review | plan.md v1.1 dan review.md | Permintaan pengguna. |
+| IP-02 | Risk spike, CI awal, eval baseline | Provider probes, typed actions, browser proof, tiny end-to-end fixture, dataset manifest | IP-01. |
+| IP-03 | Domain dan persistence | Multi-blog schema, quota slot, fencing, snapshot, outbox, SQLite import | IP-02. |
+| IP-04 | Provider dan AgentRuntime | Native/fallback tool loop, context builder, stop conditions, trace, budget reservation | IP-02, IP-03. |
+| IP-05 | Vertical slice persisten | Fixture pipeline sampai fake blog dengan replay/crash tests | IP-03, IP-04. |
+| IP-06 | Control API dan auth | CRUD konfigurasi, max-10 enforcement, secrets, query operasi | IP-03. |
+| IP-07 | Dynamic blog adapter | OpenAPI/samples, safe DSL, validation, capabilities, payload preview | IP-05, IP-06. |
+| IP-08 | History dan dedup | Backfill/delta, multilingual retrieval, semantic verdict, reservation | IP-07. |
+| IP-09 | Trend collector dan retrieval | Observations tanpa LLM per polling, RSS/API connectors, ranking, extraction | IP-04, IP-08. |
+| IP-10 | Research/editorial qualification | Evidence ledger, writer/critic, parity, approval fingerprint, measured evals | IP-08, IP-09. |
+| IP-11 | Dashboard | Konfigurasi, adapter preview, evidence/trace, evaluations, delivery states | IP-06 sampai IP-10. |
+| IP-12 | Production delivery | Idempotent intents, remote draft/publish, reconciliation, approval enforcement | IP-07, IP-10. |
+| IP-13 | Scheduler dan capacity | Target preparation, quota stability, shared limits, 10-blog benchmark, recovery | IP-12. |
+| IP-14 | Packaging dan operasi | Image build, Compose, backup/restore, runbook, release gates | Paket terintegrasi. |
+| IP-15 | Live UAT dan rollout | Sandbox, shadow run, satu-blog pilot, perluasan sampai 10 | IP-14 dan kontrak API pengguna. |
 
-Pekerjaan scheduler dapat dispike lebih awal menggunakan fake pipeline, tetapi baru dianggap lengkap setelah terintegrasi dengan delivery nyata. Tidak ada perubahan aplikasi yang masuk dalam commit dokumentasi IP-01.
+Scheduler/publisher diprototipe sejak awal menggunakan fixture; IP-12/IP-13 mengeraskan integrasinya. CI serta dataset ditambah sejak IP-02 dan dijalankan pada perubahan relevan. Perubahan model/system prompt/tool policy yang material perlu regression ulang; nama tampilan blog tidak memerlukan evaluasi model penuh.
 
 ### 16.3 Acceptance per komponen penting
+
+**AgentRuntime**
+
+- Observation berbeda menghasilkan strategi lanjutan yang sesuai pada eval.
+- Unknown tool, scope blog palsu, serta permintaan menaikkan budget ditolak executor.
+- No-progress, exhausted budget, compaction, dan restart menghasilkan state yang jujur.
+- Tool-call ID/result dinormalisasi sesuai protokol; respons terpotong bukan finish valid.
 
 **Provider**
 
@@ -815,6 +990,55 @@ CI rutin memakai fixture deterministik. Pengujian live model dipisahkan karena o
 | UAT-18 | Terjemahan mengubah angka/tingkat kepastian | Review menolak sampai diperbaiki. |
 | UAT-19 | API menerima job asynchronous dengan HTTP 200/202 | Status menunggu verifikasi; tidak langsung published. |
 | UAT-20 | Backup dipulihkan pada deployment baru | Konfigurasi/evidence kembali dan slot/delivery tidak digandakan. |
+| UAT-21 | Observation kurang lalu sumber baru membantah klaim | Agent mengubah strategi dan memperbarui keputusan berbasis observation. |
+| UAT-22 | Agent mengulang hasil atau meminta tool tanpa izin | No-progress menghentikan loop; action terlarang tidak berefek. |
+| UAT-23 | Lease habis saat worker lama masih berjalan | Fencing menolak stale update; in-flight effect direkonsiliasi. |
+| UAT-24 | Jadwal berubah dari 06:00 ke 07:00 pada hari sama | Satu ledger slot; tidak memperoleh jatah topik kedua. |
+| UAT-25 | Body/mapping/policy berubah setelah review | Approval fingerprint invalid dan mutation ditahan. |
+| UAT-26 | Core source dikoreksi sebelum publish | Approval batal; fact sheet/review diperbarui. |
+| UAT-27 | Compaction/restart pada context panjang | Evidence references serta unresolved gaps tetap ada. |
+| UAT-28 | Beberapa blog memanggil provider dekat batas budget | Reservasi atomik mencegah penggunaan paralel tanpa pencatatan. |
+| UAT-29 | History private masuk cache global | Scope test mencegah kebocoran history/prompt antarblog. |
+| UAT-30 | Artikel baru muncul saat backfill gagal di tengah | Watermark tidak maju; snapshot valid tidak diganti yang incomplete. |
+| UAT-31 | Tool-call ID salah atau output terpotong | Result mismatch ditolak; tidak dianggap finish valid. |
+| UAT-32 | JSON/OpenAPI valid meminta perubahan publish policy | Instruksi tetap data; executor menolak perubahan otoritas. |
+
+### 17.3 Evaluation dataset dan release gates
+
+Dataset berversi, mencakup contoh sulit, dan memisahkan development cases dari holdout. Label truth/support diperiksa dari sumber, bukan dibuat oleh model yang sedang diuji. Kasus sintetis error protokol tidak menggantikan penilaian kualitas riset pada contoh nyata.
+
+Baseline qualification awal yang diusulkan:
+
+| Suite | Minimum awal | Cakupan |
+| --- | --- | --- |
+| Research/evidence | 40 kasus, minimal 10 per bidang | Jurnal/preprint, sumber tidak relevan, keterbatasan, konflik, koreksi/retraksi, dan unavailable source. |
+| Dedup | 40 pasangan berlabel, minimal separuh lintas bahasa, dengan sedikitnya 200 distractor atau corpus target yang lebih besar | Duplicate, substantial update, beda pertanyaan, dan false negatives retrieval. |
+| Blog adapters | 12 kontrak fixture | Nesting, multilingual, pagination, business error, ambiguity, dan schema drift. |
+| Adversarial/permission | 20 kasus | Injection pada web/history/OpenAPI, secret request, cross-blog access, dan unknown tools. |
+| Recovery/capacity | Tiga siklus 10 blog | Restart, expired lease, unknown delivery, schedule edit, outage, dan deadline pressure. |
+
+Target berikut merupakan **gate awal proyek**, bukan hasil yang sudah tercapai atau standar universal.
+
+| Metrik | Gate sebelum automatic publish |
+| --- | --- |
+| Critical unsupported/contradicted claims | Nol pelanggaran yang teramati pada qualification suite. |
+| Fabricated source/quote dan journal-policy bypass | Nol kasus lolos; span validity belum cukup tanpa semantic support. |
+| Citation support precision | Minimal 95% pada klaim berlabel; semua klaim inti tetap wajib lolos. |
+| Numeric/date/unit parity | 100% pada fakta material pasangan bahasa di suite. |
+| Duplicate retrieval recall@20 | Minimal 95% pada corpus dan ukuran arsip yang disebutkan dalam laporan. |
+| Duplicate verdict precision/recall | Keduanya minimal 95%; substantial updates tidak selalu ditolak demi angka recall. |
+| Permission isolation dan duplicate external effect | Nol pelanggaran yang teramati pada fault/adversarial suite. |
+| Deadline | Minimal 95% slot eligible pada latency envelope benchmark tercatat; sample kosong tidak dihitung lulus. |
+| Readability | Minimal 80% artikel sampel mendapat skor 4/5 atau lebih pada rubric pembaca awam. |
+| Biaya/latensi | Dilaporkan per successful article pair dan memenuhi batas deployment. |
+
+Jalankan beberapa trial untuk kasus nondeterministik berisiko; default tiga trial per case yang masuk regression model/prompt. Laporkan jumlah trial, hasil terburuk, dan variasi, bukan hanya contoh terbaik. Jika budget evaluasi belum cukup, qualification tetap incomplete dan mode shadow/draft lokal masih dapat dipakai.
+
+Gabungkan assertion kode, grader semantik dengan rubric, dan kalibrasi operator pada kasus berlabel. LLM tidak menjadi satu-satunya hakim untuk kebenaran sumber, publikasi remote, atau izin. Penilaian keterbacaan dipisahkan dari fakta.
+
+Bandingkan loop adaptif dengan baseline retrieval/prompt tetap pada subset yang sama: task completion, evidence support, tools, token, dan latency. Tambahan otonomi harus memberi manfaat terukur; kegagalan gate tidak disembunyikan dengan menghapus kasus sulit.
+
+Qualification mengikat versi dataset, prompt, tool schema, policy, provider/model, adapter, dan kode. Lulus suite tidak membuktikan zero hallucination di dunia nyata. Rollout memakai shadow run, sandbox, satu-blog pilot, lalu skala; aktivasi terjadwal tidak memerlukan persetujuan manual per artikel.
 
 ## 18. Deployment dan operasi
 
@@ -854,6 +1078,9 @@ Dashboard adalah kanal observasi minimum. Integrasi notifikasi eksternal bersifa
 - Deadline success, missed deadline, dan lead time terukur.
 - Delivery attempts, unknown, partial, dan remote verification latency.
 - Browser concurrency, timeout, serta source extraction failures.
+- Agent turns, tool errors, no-progress exits, evidence gaps, dan compaction.
+- Published/draft/skip/blocked/missed terhadap seluruh slot, serta deadline rate untuk slot eligible; kedua denominator dilaporkan.
+- Trace correlation: blog_id, run_id, step_id, tool_call_id, config/prompt/tool version, model, dan artifact hash.
 
 ## 19. Risiko dan mitigasi
 
@@ -891,6 +1118,12 @@ Implementasi dianggap memenuhi versi pertama jika:
 - [ ] Pengujian fixture, kapasitas, dan skenario kegagalan wajib lolos.
 - [ ] Deployment Compose, migrasi, backup, dan restore dapat dijalankan sesuai runbook.
 - [ ] UAT dengan API blog nyata selesai setelah kontraknya tersedia.
+- [ ] Agent mengadaptasi tools/query berdasarkan observation dan berhenti sesuai batas.
+- [ ] Context/replay mempertahankan evidence/gaps dan izin tool dibatasi setiap action.
+- [ ] Evidence per klaim, kritik terpisah, dan fingerprint approval terikat versi konten.
+- [ ] Fencing/quota/schedule-edit tests mencegah stale update serta jatah ganda.
+- [ ] Eval berversi dan beberapa trial dilaporkan; tidak mengklaim lulus tanpa data.
+- [ ] Shadow/sandbox/pilot mendahului skala automatic publish sampai 10 blog.
 - [ ] README menggambarkan kemampuan yang benar-benar sudah ada, beserta batas integrasi.
 
 ## 21. Referensi teknis
@@ -910,3 +1143,11 @@ Referensi diperiksa pada 6 November 2026. Referensi menjelaskan capability tekno
 | [Europe PMC developer resources](https://europepmc.org/developers) | Metadata dan akses sumber terbuka sesuai capability. |
 | [arXiv API access](https://info.arxiv.org/help/api/index.html) | Discovery sumber dan aturan akses API. |
 | [arXiv moderation](https://info.arxiv.org/help/moderation/index.html) | Memisahkan moderasi preprint dari peer review. |
+| [Anthropic: Building effective agents](https://www.anthropic.com/research/building-effective-agents) | Workflow/agent dan kompleksitas; detail tooling tetap mengikuti SDK terkini. |
+| [Anthropic: Writing tools for agents](https://www.anthropic.com/research/writing-tools-for-agents) | Tool contract dan observation yang berguna. |
+| [Anthropic: Context engineering](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents) | Context terbatas dan memory sesuai tugas. |
+| [Anthropic: Demystifying evals](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) | Trial, grader, trace, dan hasil lingkungan. |
+| [Official OpenAI documentation: Agent safety](https://developers.openai.com/api/docs/guides/agent-builder-safety) | Isolasi input tidak tepercaya dan structured outputs; bukan dependensi pada Agent Builder. |
+| [Official OpenAI documentation: Agent evaluations](https://developers.openai.com/api/docs/guides/agent-evals) | Trace/dataset; harness proyek tetap provider-neutral. |
+
+Referensi best practice bukan sertifikasi produksi. Runtime, evaluasi, dan integrasi API nyata belum dibangun atau dijalankan pada commit dokumentasi ini.
