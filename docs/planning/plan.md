@@ -2,7 +2,7 @@
 
 | Metadata | Nilai |
 | --- | --- |
-| Status | rencana implementasi; belum menyatakan fitur telah dibangun atau siap produksi. |
+| Status | implementasi bertahap; lihat status milestone pada bagian 15.4. Belum menyatakan siap produksi. |
 | Pemilik produk | Arya / aryanattapt |
 | Penyusun dan reviewer | Codex |
 | Versi rencana | 1.2 — review alur lintas komponen dan traceability requirement |
@@ -981,6 +981,25 @@ Semua milestone mengacu pada kebutuhan BR di bagian 3. Status rencana tidak dian
 - Kontrak blog yang akan disediakan pengguna diperlukan untuk mengakhiri M7.
 - Dukungan draft, jadwal remote, relasi terjemahan, lookup, dan idempotency harus dibuktikan dari API tujuan.
 - Waktu preparation dan resource final ditetapkan berdasarkan benchmark, bukan asumsi bahwa semua riset selesai dalam dua jam.
+
+### 15.4 Status eksekusi (6 November 2026)
+
+Status berikut mengacu pada source code dan verifikasi lokal dalam repository. Status “sebagian” berarti deliverable telah dimulai tetapi kriteria keluar milestone belum seluruhnya lulus.
+
+| Milestone | Status | Implementasi yang tersedia | Sisa utama sebelum kriteria keluar |
+| --- | --- | --- | --- |
+| M0 — Risk spike dan eval baseline | Sebagian | Typed tool loop, adapter protokol OpenAI-compatible/Anthropic, budget, browser fallback terisolasi, evidence span, dan policy tests. | Eval adaptasi dengan gold set, fixture loop penuh, dan reconciliation timeout fake blog. |
+| M1 — Fondasi durabel | Sebagian besar | SQLAlchemy schema PostgreSQL, Alembic, auth/CSRF, secret encryption, batas 10 profil, slot unik, worker lease dan fencing. | Backup/restore, migrasi data SQLite existing, serta fault/recovery test lintas proses. |
+| M2 — Vertical slice persisten | Sebagian | Worker menyambungkan trend, history GET, research tools, penulisan bilingual, critic, policy, dan penyimpanan draft lokal/artifact. | Fixture end-to-end, replay/restart, dan outbox fake blog yang membuktikan retry aman. |
+| M3 — Dashboard dan adapter | Sebagian | Dashboard konfigurasi, OpenAI-compatible/Anthropic, jadwal, JSONPath mapping/preview, OpenAPI operation list, dan validasi history read-only. | Capability test write pada sandbox, UI evidence/trace lebih lengkap, dan dukungan kontrak blog nyata. |
+| M4 — Discovery dan history nyata | Sebagian | Sinyal Hacker News Algolia/arXiv dengan scoring heuristik, koleksi cache, Crossref/Europe PMC, dan history adapter berpaginasi. | Connector RSS tambahan, indeks multilingual semantik, backfill/delta, coverage serta recall benchmark. |
+| M5 — Research/editorial qualification | Sebagian | Source metadata, DOAJ journal-policy signal, immutable quote evidence, bilingual writer, critic, sanitasi, dan fail-closed decision. | Eval holdout dan multi-trial, kalibrasi review, pemeriksaan koreksi/retraksi lintas sumber, serta qualification per model. |
+| M6 — Deadline dan kapasitas | Sebagian | Daily quota slot, lead-time scheduling, worker polling, heartbeat, dan batas concurrency per worker. | Publisher/reconciliation, admission control global, shared provider limits, serta uji kapasitas 10 blog. |
+| M7 — Deployment, UAT, dan rollout | Sebagian | Dockerfile multi-stage, Docker Compose PostgreSQL/API/worker, migrasi saat startup, CI untuk backend/frontend. | Kontrak dan sandbox API blog, backup/restore, live UAT, shadow run, dan pilot. |
+
+Verifikasi lokal saat ini menjalankan unit/API tests dan production build dashboard. Hasil pass bukan pengganti evaluasi kualitas model atau UAT live. Untuk keadaan rilis paling baru, lihat README dan hasil commit implementasi.
+
+Keputusan keselamatan untuk versi ini: semua run menyimpan artikel secara lokal; tidak ada jalur otomatis yang menulis ke API blog. Setelah kontrak API tersedia, capability create-draft/publish, lookup/reconciliation, idempotency, dan hasil remote perlu dibuktikan sebelum melepas gate tersebut.
 
 ## 16. Implementation plan
 

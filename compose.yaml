@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: takumi
+      POSTGRES_USER: takumi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U takumi -d takumi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: ["api"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      TAKUMI_MASTER_KEY: ${TAKUMI_MASTER_KEY:?Set TAKUMI_MASTER_KEY in .env}
+      DATA_DIR: /data
+      WEB_DIST_DIR: /app/web-dist
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      TZ: ${TZ:-Asia/Jakarta}
+      RESEARCH_ALLOWED_DOMAINS: ${RESEARCH_ALLOWED_DOMAINS:?Set RESEARCH_ALLOWED_DOMAINS in .env}
+      ADMIN_ENDPOINT_ALLOWLIST: ${ADMIN_ENDPOINT_ALLOWLIST:-}
+    volumes:
+      - takumi_data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      TAKUMI_MASTER_KEY: ${TAKUMI_MASTER_KEY:?Set TAKUMI_MASTER_KEY in .env}
+      DATA_DIR: /data
+      AGENT_HEADLESS: ${AGENT_HEADLESS:-true}
+      TZ: ${TZ:-Asia/Jakarta}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      RESEARCH_ALLOWED_DOMAINS: ${RESEARCH_ALLOWED_DOMAINS:?Set RESEARCH_ALLOWED_DOMAINS in .env}
+      ADMIN_ENDPOINT_ALLOWLIST: ${ADMIN_ENDPOINT_ALLOWLIST:-}
+    volumes:
+      - takumi_data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  takumi_data:

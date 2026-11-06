@@ -10,3 +10,6 @@ data/
 *.db-wal
 browser-traces/
 downloads/
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

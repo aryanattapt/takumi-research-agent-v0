@@ -74,4 +74,4 @@ Daftar ini adalah input implementasi/UAT yang belum tersedia, bukan requirement 
 - BR-01 sampai BR-15 mempunyai rujukan desain dan acceptance.
 - UAT-01 sampai UAT-51 bernomor unik dan meliputi alur utama serta fault scenarios yang direncanakan.
 - Review pertama dan lanjutan dicatat dengan baseline berbeda agar perubahan dapat ditelusuri.
-- Status saat ini: desain siap untuk risk spike; runtime, quality metrics, dan integrasi live belum dinyatakan lulus.
+- Status review desain: requirement dipetakan ke rencana dan acceptance. Status implementasi runtime, quality metrics, dan integrasi live dicatat pada bagian 15.4 plan.md dan belum seluruhnya lulus.

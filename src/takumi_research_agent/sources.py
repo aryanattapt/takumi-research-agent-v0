@@ -144,12 +144,13 @@ def _europe_pmc_record(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class LiteratureSources:
-    def __init__(self, store: Store, timezone: str = "Asia/Jakarta", transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, store: Store | None = None, timezone: str = "Asia/Jakarta", transport: httpx.AsyncBaseTransport | None = None):
         self.store = store
         self.timezone = timezone
+        self._papers: dict[str, dict[str, Any]] = {}
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(25, connect=10),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "TakumiResearchAgent/0.1"},
             transport=transport,
         )
@@ -159,6 +160,17 @@ class LiteratureSources:
 
     def today(self) -> date:
         return datetime.now(ZoneInfo(self.timezone)).date()
+
+    def _save_paper(self, doi: str, record: dict[str, Any], content: str = "") -> None:
+        self._papers[doi] = {**record, "content": content or record.get("content", "")}
+        if self.store is not None:
+            self.store.save_paper(doi, record, content)
+
+    def _get_paper(self, doi: str) -> dict[str, Any] | None:
+        if self.store is not None:
+            return self.store.get_paper(doi)
+        record = self._papers.get(doi)
+        return dict(record) if record else None
 
     async def search(self, query: str, source: str = "both", rows: int = 10) -> list[dict[str, Any]]:
         terms = query.strip()
@@ -176,8 +188,7 @@ class LiteratureSources:
                 if record:
                     found[record["doi"]] = record
         if source in {"europe-pmc", "both"}:
-            today = self.today()
-            query_text = f'TITLE_ABS:({terms}) AND FIRST_PDATE:[{today.year - 5}-01-01 TO {today.isoformat()}] AND NOT SRC:PPR'
+            query_text = f'TITLE_ABS:({terms}) AND NOT SRC:PPR'
             response = await self.client.get(
                 f"{EUROPE_PMC}/search",
                 params={"query": query_text, "format": "json", "resultType": "core", "pageSize": min(max(rows, 1), 20)},
@@ -202,12 +213,12 @@ class LiteratureSources:
                     found[record["doi"]] = record
         results = sorted(found.values(), key=lambda item: (item.get("publication_date", ""), item["title"]), reverse=True)
         for result in results:
-            self.store.save_paper(result["doi"], result)
+            self._save_paper(result["doi"], result)
         return results
 
     async def read(self, doi_value: str) -> dict[str, Any]:
         doi = normalize_doi(doi_value)
-        paper = self.store.get_paper(doi)
+        paper = self._get_paper(doi)
         if paper is None:
             raise ValueError("Paper was not found in this run. Search for it first.")
         content = paper.get("content", "")
@@ -232,27 +243,17 @@ class LiteratureSources:
         paper["evidence_id"] = evidence_id
         paper["content"] = content
         paper["content_source"] = "Europe PMC full text" if paper.get("pmcid") and content != paper.get("abstract") else "abstract metadata"
-        self.store.save_paper(doi, paper, content)
+        self._save_paper(doi, paper, content)
         return {key: paper.get(key) for key in ("doi", "title", "venue", "publication_date", "url", "abstract", "content", "content_source", "evidence_id")}
 
     async def verify(self, doi_value: str) -> dict[str, Any]:
         doi = normalize_doi(doi_value)
-        paper = self.store.get_paper(doi)
+        paper = self._get_paper(doi)
         if paper is None:
             raise ValueError("Paper was not found in this run. Search for it first.")
         reasons = []
-        interval = _date_interval(str(paper.get("publication_date", "")))
-        if not interval:
-            reasons.append("Publication date is missing or incomplete.")
-        else:
-            earliest, _ = interval
-            today = self.today()
-            try:
-                cutoff = today.replace(year=today.year - 5)
-            except ValueError:
-                cutoff = today.replace(year=today.year - 5, day=28)
-            if earliest < cutoff:
-                reasons.append("The full publication-date range is not within the rolling five-year window.")
+        if not paper.get("publication_date"):
+            reasons.append("Publication date is missing.")
         if paper.get("type") != "journal-article":
             reasons.append("Source metadata does not identify this item as a journal article.")
         if paper.get("retracted"):
@@ -260,7 +261,7 @@ class LiteratureSources:
         if reasons:
             paper["review_status"] = "rejected"
             paper["review_reason"] = reasons
-            self.store.save_paper(doi, paper)
+            self._save_paper(doi, paper)
             return {"status": "rejected", "reasons": reasons, "doi": doi}
 
         review_evidence = []
@@ -305,9 +306,9 @@ class LiteratureSources:
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             reasons.append(f"DOAJ verification could not be completed: {type(exc).__name__}.")
 
-        status = "confirmed" if review_evidence and not reasons else "unknown"
+        status = "journal_peer_review_policy_found" if review_evidence and not reasons else "unknown"
         paper["review_status"] = status
         paper["review_evidence"] = review_evidence
-        paper["review_reason"] = reasons or ["Exact DOI and venue ISSN matched DOAJ peer-review eligibility records."]
-        self.store.save_paper(doi, paper)
+        paper["review_reason"] = reasons or ["Exact DOI and venue ISSN matched a DOAJ-listed journal; journal-level peer-review policy was found, but this check does not prove article-specific peer-review handling."]
+        self._save_paper(doi, paper)
         return {"status": status, "doi": doi, "venue": paper.get("venue"), "evidence": review_evidence, "reasons": paper["review_reason"]}

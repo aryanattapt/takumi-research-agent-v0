@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+.pytest_cache
+__pycache__
+*.py[cod]
+*.db
+data
+browser-traces
+downloads
+web/node_modules
+web/dist

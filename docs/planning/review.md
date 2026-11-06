@@ -10,6 +10,8 @@
 | Metode | static self-review terhadap requirement, kontrak desain, failure scenarios, dan sumber primer. |
 | Batas | belum ada runtime agent/dashboard/publisher atau benchmark live yang dijalankan. |
 
+Catatan: dokumen ini merekam review desain terhadap baseline sebelum implementasi. Status source code setelah pengerjaan dicatat terpisah pada bagian 15.4 di plan.md; review ini tidak menyatakan kriteria desain telah lulus pada runtime.
+
 ## 1. Kesimpulan review pertama
 
 Plan awal mempunyai fondasi yang tepat: modular monolith, API/RSS-first, policy publish/draft, adapter tervalidasi, outbox, dan status unknown/partial. Pendekatan tersebut dipertahankan.

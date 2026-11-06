@@ -5,25 +5,45 @@ build-backend = "hatchling.build"
 [project]
 name = "takumi-research-agent"
 version = "0.1.0"
-description = "Autonomous bilingual science research and publishing agent"
+description = "Bilingual science research agent with guarded blog workflow"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Codex" }]
 dependencies = [
+  "alembic>=1.14,<2",
+  "anthropic>=0.52,<1",
+  "apscheduler>=3.10,<4",
+  "bleach>=6.2,<7",
+  "cryptography>=44,<47",
+  "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "markdown>=3.7,<4",
+  "openai>=1.75,<3",
+  "psycopg[binary]>=3.2,<4",
   "pydantic>=2.10,<3",
   "python-dotenv>=1.0,<2",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
   "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]
-browser = ["browser-use==0.13.14"]
+browser = ["playwright>=1.50,<2"]
 pdf = ["pypdf>=5,<7"]
-dev = ["pytest>=8.3,<10"]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.25,<2",
+  "ruff>=0.11,<1",
+]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/takumi_research_agent"]
+[project.scripts]
+takumi = "takumi_research_agent.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/takumi_research_agent"]
