@@ -17,7 +17,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Riwayat dan mapping JSON blog | GET read-only, OpenAPI operation list, JSONPath terbatas, preview dan pagination |
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
-| Publish bila didukung jurnal; selain itu draft | Kebijakan keputusan tersedia; remote draft/publish menunggu kontrak blog dan capability test |
+| Publish bila didukung jurnal; selain itu draft | Outbox delivery dan approval fingerprint tersedia; eksekusi remote tetap menunggu kontrak blog dan capability create/publish yang terbukti |
 | Evaluasi kualitas model, benchmark 10 blog, backup/restore | Belum selesai |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
@@ -41,7 +41,9 @@ Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data
 3. Baca operasi OpenAPI. Masukkan mapping untuk respons list, coba preview terhadap sample JSON, pilih operasi GET, lalu jalankan validasi read-only.
 4. Aktifkan profil setelah riwayat blog tervalidasi. Aktivasi belum mengizinkan mutasi atau publish.
 5. Gunakan tombol Jalankan dry-run untuk memulai riset lebih awal. Tombol ini mengakses provider model dan sumber eksternal, tetapi tidak menulis ke API blog.
-6. Buka Run history untuk melihat keputusan, hasil review, dan artikel Indonesia/English.
+6. Untuk mengaktifkan delivery, pilih operasi POST/PUT create, lalu jalankan Uji sandbox create. Uji ini mengirim **satu draft nyata** ke blog dan harus dipakai pada endpoint sandbox; hasilnya membuktikan create tunggal, bukan publish, idempotency, atau lookup.
+7. Jalankan sandbox run untuk menyiapkan intent delivery, lalu buka Run history dan konfirmasi Kirim ke blog. Dry-run tidak pernah mengirim request. Jika hasil sebuah intent `unknown`, gunakan tombol Sukses/Gagal untuk rekonsiliasi; keputusan itu tercatat sebagai event audit, bukan intent baru.
+8. Buka Run history untuk melihat keputusan, hasil review, artikel Indonesia/English, dan status outbox delivery.
 
 Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset.
 
@@ -71,6 +73,9 @@ Perintah layanan:
 ## Guard dan batas integrasi
 
 - Agent riset hanya mempunyai tool baca sumber, history blog, dan rekam evidence. Tool riset tidak dapat menerbitkan artikel.
+- Delivery hanya berjalan dari outbox intent yang sudah tersimpan; approval fingerprint harus masih cocok dengan body, review, evidence/source, mapping, editorial settings, jadwal, dan destination.
+- Dry-run tidak pernah mengirim request ke blog. Eksekusi sandbox/live tetap ditahan oleh pause, recovery mode, dan capability create/publish yang belum terbukti.
+- Outcome `unknown` tidak di-retry otomatis; rekonsiliasi operator dicatat dengan audit trail dan tidak membuat payload/key baru.
 - Mapping API adalah JSONPath subset, bukan kode executable.
 - History pagination yang berulang, tidak maju, atau tidak lengkap memblokir keputusan novelty.
 - Source quote harus cocok dengan artifact content-addressed sebelum dipakai sebagai evidence.
@@ -86,7 +91,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Tes menguji agent runtime, mapping/pagination blog, policy editorial, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime, mapping/pagination blog, policy editorial, outbox delivery, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 
@@ -99,6 +104,7 @@ Tes menguji agent runtime, mapping/pagination blog, policy editorial, quota/leas
 | src/takumi_research_agent/research | Retriever, browser fallback, artifacts, evidence, serta research tools |
 | src/takumi_research_agent/editorial | Penulis bilingual, critic, sanitizer, dan final body |
 | src/takumi_research_agent/orchestration | Jadwal slot, worker lease, dan research-to-local-draft pipeline |
+| src/takumi_research_agent/delivery | Outbox intent, approval fingerprint, dan dispatcher bertingkat capability |
 | src/takumi_research_agent/persistence | SQLAlchemy models, database, dan fenced queue |
 | migrations | Schema versi Alembic |
 | web | React/TypeScript dashboard |

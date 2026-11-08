@@ -165,13 +165,17 @@ class BlogApiAdapter:
         raise ContractError("Configured pagination limit reached; history is incomplete")
 
     async def create(self, canonical: dict[str, Any], *, intent_key: str, publish: bool) -> dict[str, Any]:
+        payload = build_create_payload(canonical, self.mapping)
+        return await self.send_payload(payload, intent_key=intent_key, publish=publish)
+
+    async def send_payload(self, payload: dict[str, Any], *, intent_key: str, publish: bool) -> dict[str, Any]:
+        """Send the exact stored payload so preview, outbox, and wire body cannot drift."""
         if not self.create_operation:
             raise ContractError("No create endpoint is configured")
         if publish and not self.capabilities.publish:
             raise ContractError("Publish capability has not been proven")
         if not publish and not self.capabilities.create_draft:
             raise ContractError("Draft capability has not been proven")
-        payload = build_create_payload(canonical, self.mapping)
         headers = {"Idempotency-Key": intent_key} if self.capabilities.idempotency_key else {}
         try:
             response = await self.client.request(

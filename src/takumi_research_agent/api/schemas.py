@@ -91,3 +91,25 @@ class GlobalControlRequest(StrictRequest):
 
 class AdapterReadTestRequest(StrictRequest):
     list_operation_id: str = Field(min_length=1, max_length=200)
+
+
+class AdapterCreateOperationRequest(StrictRequest):
+    create_operation_id: str = Field(min_length=1, max_length=200)
+
+
+class AdapterCreateTestRequest(StrictRequest):
+    acknowledge_remote_write: bool
+
+
+class ManualRunRequest(StrictRequest):
+    execution_mode: Literal["dryrun", "sandbox"] = "dryrun"
+
+
+class DeliveryDispatchRequest(StrictRequest):
+    execution_mode: Literal["sandbox", "live"] = "sandbox"
+
+
+class DeliveryReconcileRequest(StrictRequest):
+    outcome: Literal["succeeded", "failed"]
+    remote_id: str | None = Field(default=None, max_length=300)
+    note: str | None = Field(default=None, max_length=500)

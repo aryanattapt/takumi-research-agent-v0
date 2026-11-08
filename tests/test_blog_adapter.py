@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from pydantic import ValidationError
@@ -83,3 +85,30 @@ async def test_create_timeout_becomes_unknown_and_keeps_same_intent_key():
             await adapter.create({"title": "Title", "content": "Body", "locale": "en", "status": "draft"}, intent_key="stable-key", publish=False)
     finally:
         await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_send_payload_posts_the_exact_stored_payload():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request):
+        seen["payload"] = json.loads(request.content)
+        seen["idempotency_key"] = request.headers.get("Idempotency-Key")
+        return httpx.Response(201, json={"post": {"id": "9"}})
+
+    adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=mapping(),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        create_operation=type("Op", (), {"method": "post", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True, create_draft=True, idempotency_key=True),
+        transport=httpx.MockTransport(handler),
+    )
+    stored_payload = {"article": {"title": "Title", "body": "Body", "language": "en", "state": "drafting"}}
+    try:
+        result = await adapter.send_payload(stored_payload, intent_key="stable-key", publish=False)
+    finally:
+        await adapter.close()
+    assert result["http_status"] == 201
+    assert seen == {"payload": stored_payload, "idempotency_key": "stable-key"}

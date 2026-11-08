@@ -11,6 +11,7 @@ from takumi_research_agent.agent.runtime import RequestBudget
 from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities
 from takumi_research_agent.blogs.contracts import BlogMapping, Operation
 from takumi_research_agent.config import Settings
+from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
 from takumi_research_agent.discovery.trends import TrendCandidate, TrendCollector
 from takumi_research_agent.domain.policy import editorial_decision
 from takumi_research_agent.editorial.service import EditorialService
@@ -220,6 +221,20 @@ class DailyResearchProcessor:
                         "novelty_reason": pair.novelty_reason,
                         "trend": {"source": trend.source, "score": trend.score, "score_details": trend.score_details},
                         "agent": agent_metrics,
+                        # Frozen review inputs: delivery approval must break if evidence or sources change later.
+                        "evidence": [
+                            {"evidence_id": item.evidence_id, "source_id": item.source_id, "content_hash": item.content_hash}
+                            for item in pair.evidence
+                        ],
+                        "sources": [
+                            {
+                                "source_id": source.source_id,
+                                "content_hash": source.content_hash,
+                                "read_status": source.read_status,
+                                "retracted": source.retracted,
+                            }
+                            for source in pair.sources
+                        ],
                     },
                 )
             )
@@ -378,6 +393,22 @@ class DailyResearchProcessor:
                 trend=selected,
                 agent_metrics={"physical_requests": budget.physical_requests, "tool_actions": budget.tool_actions},
             )
+            delivery_note: dict[str, Any] = {"intents": 0}
+            try:
+                with self.sessions.begin() as session:
+                    created_intents = DeliveryService().prepare(session, run_id=run.id)
+                    delivery_note["intents"] = len(created_intents)
+                    session.add(
+                        RunEvent(
+                            run_id=run.id,
+                            event_type="delivery_prepared",
+                            details={"intents": len(created_intents), "execution_mode": run.execution_mode},
+                        )
+                    )
+            except DeliveryBlocked as exc:
+                delivery_note["blocked"] = exc.code
+                with self.sessions.begin() as session:
+                    session.add(RunEvent(run_id=run.id, event_type="delivery_plan_skipped", details={"code": exc.code, "detail": exc.detail[:300]}))
             return {
                 "status": "completed",
                 "reason": "draft_saved_locally" if decision.decision in {"draft", "publish"} else "editorial_policy_blocked",
@@ -385,6 +416,7 @@ class DailyResearchProcessor:
                 "pair_completeness": "complete" if decision.decision in {"draft", "publish"} else "none",
                 "deadline_result": "met" if datetime.now(timezone.utc) <= run.target_at.replace(tzinfo=timezone.utc) else "late",
                 "pair_id": pair_id,
+                "delivery": delivery_note,
                 "note": "remote_blog_write_not_validated",
             }
         finally:

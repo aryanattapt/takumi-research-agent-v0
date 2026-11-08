@@ -45,5 +45,6 @@ export type Run = {
   editorial_decision: string;
   pair_completeness: string;
   deadline_result: string;
+  execution_mode?: string;
   created_at: string;
 };

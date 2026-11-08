@@ -107,7 +107,7 @@ function App() {
           {page === "overview" && <Overview blogs={blogs} providers={providers} runs={runs} control={control} onOpen={setPage} />}
           {page === "blogs" && <section className="space-y-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="section-title">Koneksi blog</h2><p className="section-subtitle">Maksimal 10 profil. Struktur JSON dipetakan per blog dan diuji sebelum digunakan.</p></div><button className="primary-button" disabled={blogs.length >= 10} onClick={() => setShowBlogForm(true)}>Tambah blog <span className="ml-2 opacity-75">{blogs.length}/10</span></button></div>{blogs.length ? <div className="grid gap-4 xl:grid-cols-2">{blogs.map((blog) => <BlogCard key={blog.id} blog={blog} providers={providers} csrf={csrf} onRefresh={loadAll} />)}</div> : <EmptyState title="Belum ada blog" body="Tambahkan blog API dan OpenAPI contract atau mapping contoh response untuk memulai." />}</section>}
           {page === "providers" && <section className="space-y-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="section-title">Model providers</h2><p className="section-subtitle">OpenAI-compatible endpoints dan Anthropic Messages API. Credential tersimpan terenkripsi.</p></div><button className="primary-button" onClick={() => setShowProviderForm(true)}>Tambah provider</button></div>{providers.length ? <div className="grid gap-4 xl:grid-cols-2">{providers.map((provider) => <ProviderCard key={provider.id} provider={provider} csrf={csrf} onEdit={() => { setEditingProvider(provider); setShowProviderForm(true); }} onRefresh={loadAll} />)}</div> : <EmptyState title="Belum ada model" body="Simpan provider dulu. Probe akan mengirim satu request model dan bisa memakai token." />}</section>}
-          {page === "runs" && <RunsPage runs={runs} blogs={blogs} />}
+          {page === "runs" && <RunsPage runs={runs} blogs={blogs} csrf={csrf} />}
           {page === "settings" && <SettingsPage control={control} activeCount={activeCount} onPause={setPaused} />}
         </>}
       </div>
@@ -136,6 +136,7 @@ function Overview({ blogs, providers, runs, control, onOpen }: { blogs: Blog[]; 
 function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers: Provider[]; csrf: string; onRefresh: () => Promise<void> }) {
   const [ops, setOps] = useState<{ operation_id: string; method: string; path: string }[]>([]);
   const [selected, setSelected] = useState(blog.capabilities.list_operation?.operation_id ?? "");
+  const [createSelected, setCreateSelected] = useState(blog.capabilities.create_operation?.operation_id ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [topicOpen, setTopicOpen] = useState(false);
@@ -148,7 +149,7 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
   const [runBusy, setRunBusy] = useState(false);
   async function loadContract() {
     setBusy(true); setError("");
-    try { const result = await api<{ operations: typeof ops }>(`/api/v1/blogs/${blog.id}/adapter/contract`); setOps(result.operations); const first = result.operations.find((op) => op.method === "get"); if (first && !selected) setSelected(first.operation_id); }
+    try { const result = await api<{ operations: typeof ops }>(`/api/v1/blogs/${blog.id}/adapter/contract`); setOps(result.operations); const first = result.operations.find((op) => op.method === "get"); if (first && !selected) setSelected(first.operation_id); const createFirst = result.operations.find((op) => op.method === "post" || op.method === "put"); if (createFirst && !createSelected) setCreateSelected(createFirst.operation_id); }
     catch (e) { setError(e instanceof Error ? e.message : "Gagal membaca contract"); }
     finally { setBusy(false); }
   }
@@ -156,6 +157,19 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
     setBusy(true); setError("");
     try { await api(`/api/v1/blogs/${blog.id}/adapter/test-read`, { method: "POST", body: JSON.stringify({ list_operation_id: selected }) }, csrf); await onRefresh(); }
     catch (e) { setError(e instanceof Error ? e.message : "Read test gagal"); }
+    finally { setBusy(false); }
+  }
+  async function saveCreateOperation() {
+    setBusy(true); setError("");
+    try { await api(`/api/v1/blogs/${blog.id}/adapter/create-operation`, { method: "POST", body: JSON.stringify({ create_operation_id: createSelected }) }, csrf); await onRefresh(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Gagal menyimpan create operation"); }
+    finally { setBusy(false); }
+  }
+  async function testCreate() {
+    if (!window.confirm("Uji ini mengirim satu draft nyata ke blog. Lanjutkan hanya jika endpoint adalah sandbox.")) return;
+    setBusy(true); setError("");
+    try { await api(`/api/v1/blogs/${blog.id}/adapter/test-create`, { method: "POST", body: JSON.stringify({ acknowledge_remote_write: true }) }, csrf); await onRefresh(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Uji create gagal; periksa hasil remote sebelum mengulang."); await onRefresh(); }
     finally { setBusy(false); }
   }
   async function toggleActive(active: boolean) {
@@ -197,20 +211,22 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
     } catch (e) { setError(e instanceof Error ? e.message : "Mapping JSON tidak valid"); }
     finally { setBusy(false); }
   }
-  async function startDryRun() {
+  async function startRun(mode: "dryrun" | "sandbox") {
+    if (mode === "sandbox" && !window.confirm("Sandbox run tetap memakai provider dan sumber berbayar. Hasilnya menjadi intent delivery yang bisa dikirim setelah Anda menekan tombol kirim. Lanjutkan?")) return;
     setRunBusy(true); setError("");
     try {
-      await api("/api/v1/blogs/" + blog.id + "/runs", { method: "POST" }, csrf);
+      await api("/api/v1/blogs/" + blog.id + "/runs", { method: "POST", body: JSON.stringify({ execution_mode: mode }) }, csrf);
       await onRefresh();
-    } catch (e) { setError(e instanceof Error ? e.message : "Gagal mengantrikan dry-run"); }
+    } catch (e) { setError(e instanceof Error ? e.message : "Gagal mengantrikan run"); }
     finally { setRunBusy(false); }
   }
   const providerName = providers.find((p) => p.id === blog.provider_id)?.name ?? "Belum dipilih";
   const providerReady = providers.some((p) => p.id === blog.provider_id && p.active && p.capability_result.status === "reachable");
   return <article className="panel overflow-hidden"><div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5"><div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{blog.name}</h3><span className={`status-pill ${blog.active ? "status-green" : "status-gray"}`}>{blog.active ? "Aktif" : "Nonaktif"}</span></div><p className="mt-1 truncate text-xs text-slate-500">{blog.base_url}</p></div><span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">rev {blog.revision}</span></div>
-    <div className="flex flex-wrap gap-2 px-5"><button className="secondary-button" onClick={() => setEditOpen(true)}>Edit profil</button><button className="secondary-button" disabled={!blog.active || runBusy} onClick={() => void startDryRun()}>{runBusy ? "Mengantrikan…" : "Jalankan dry-run"}</button><p className="w-full text-xs text-slate-500">Dry-run memakai provider dan sumber eksternal, tetapi hasilnya hanya tersimpan lokal; tidak ada penulisan ke blog.</p></div>
+    <div className="flex flex-wrap gap-2 px-5"><button className="secondary-button" onClick={() => setEditOpen(true)}>Edit profil</button><button className="secondary-button" disabled={!blog.active || runBusy} onClick={() => void startRun("dryrun")}>{runBusy ? "Mengantrikan…" : "Jalankan dry-run"}</button><button className="secondary-button" disabled={!blog.active || runBusy} onClick={() => void startRun("sandbox")}>Jalankan sandbox</button><p className="w-full text-xs text-slate-500">Dry-run hanya menyimpan draft lokal. Sandbox menyiapkan intent delivery; pengiriman tetap harus dikonfirmasi manual dan capability create harus terbukti.</p></div>
     <div className="grid gap-3 p-5 sm:grid-cols-3"><MetricSmall label="Provider" value={providerName} /><MetricSmall label="Jadwal" value={blog.schedule_enabled ? `${blog.publish_time} ${blog.schedule_timezone}` : "Nonaktif"} /><MetricSmall label="History read" value={blog.capability_result.list_posts ? `${blog.capability_result.records_read ?? 0} artikel` : "Belum dites"} /></div>
     <div className="space-y-4 border-t border-slate-100 p-5"><div className="flex flex-wrap gap-2"><button className="secondary-button" onClick={() => void loadContract()} disabled={busy}>{busy ? "Memuat…" : "Baca OpenAPI"}</button>{ops.length > 0 && <><select aria-label="List GET operation" value={selected} onChange={(e) => setSelected(e.target.value)} className="field-select min-w-48 flex-1"><option value="">Pilih GET list operation</option>{ops.filter((op) => op.method === "get").map((op) => <option key={op.operation_id} value={op.operation_id}>{op.operation_id} · {op.path}</option>)}</select><button className="secondary-button" onClick={() => void testRead()} disabled={busy || !selected}>Test read-only GET</button></>}</div>
+      {ops.length > 0 && <div className="flex flex-wrap gap-2"><select aria-label="Create POST/PUT operation" value={createSelected} onChange={(e) => setCreateSelected(e.target.value)} className="field-select min-w-48 flex-1"><option value="">Pilih POST/PUT create operation</option>{ops.filter((op) => op.method === "post" || op.method === "put").map((op) => <option key={op.operation_id} value={op.operation_id}>{op.operation_id} · {op.path}</option>)}</select><button className="secondary-button" onClick={() => void saveCreateOperation()} disabled={busy || !createSelected}>Simpan create operation</button><button className="secondary-button" onClick={() => void testCreate()} disabled={busy || !blog.capabilities.create_operation}>{busy ? "Memproses…" : "Uji sandbox create"}</button></div>}
       <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex gap-4"><button className="text-sm font-medium text-slate-600 hover:text-ink" onClick={() => setTopicOpen(!topicOpen)}>{topicOpen ? "Sembunyikan cakupan" : "Lihat cakupan topik"}</button><button className="text-sm font-medium text-slate-600 hover:text-ink" onClick={() => { setMappingText(JSON.stringify(blog.adapter_mapping, null, 2)); setMappingOpen(!mappingOpen); }}>JSON mapping</button></div><button className={blog.active ? "danger-button" : "secondary-button"} disabled={busy || (!blog.active && (!blog.capability_result.history_complete || !providerReady))} onClick={() => void toggleActive(!blog.active)}>{blog.active ? "Nonaktifkan profil" : "Aktifkan untuk riset"}</button></div>
       {topicOpen && <div className="flex flex-wrap gap-2">{fields.map((field) => <span className={`topic-chip ${blog.topic_settings[field] ? "topic-on" : ""}`} key={field}>{field}</span>)}</div>}
       {mappingOpen && <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4"><p className="text-sm font-semibold">Response dan payload mapping</p><label className="field-label">JSONPath mapping<textarea aria-label="JSONPath mapping" value={mappingText} onChange={(e) => setMappingText(e.target.value)} rows={8} className="field-input font-mono text-xs" placeholder={'{"list_path":"$.data.items","response_fields":{"id":"$.id","title":"$.title","content":"$.content"},"create_fields":{"title":"$.article.title","content":"$.article.body","status":"$.article.status"}}'} /></label><label className="field-label">Sample API response<textarea aria-label="Sample API response" value={sampleText} onChange={(e) => setSampleText(e.target.value)} rows={5} className="field-input font-mono text-xs" /></label><label className="field-label">Canonical create sample<textarea aria-label="Canonical create sample" value={canonicalText} onChange={(e) => setCanonicalText(e.target.value)} rows={4} className="field-input font-mono text-xs" /></label><div className="flex gap-2"><button className="secondary-button" onClick={() => void previewMapping()} disabled={busy}>Preview only</button><button className="primary-button" onClick={() => void saveMapping()} disabled={busy}>Simpan mapping</button></div>{preview && <pre className="max-h-64 overflow-auto rounded-xl bg-ink p-3 text-xs text-teal-100">{preview}</pre>}</div>}
@@ -308,17 +324,43 @@ function BlogModal({ blog, providers, csrf, onClose, onSaved }: { blog?: Blog; p
     </form>
   </Modal>;
 }
-function RunsPage({ runs, blogs }: { runs: Run[]; blogs: Blog[] }) {
+function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: string }) {
   const [detail, setDetail] = useState<Record<string, any> | null>(null);
   const [locale, setLocale] = useState<"id" | "en">("id");
   const [error, setError] = useState("");
+  const [dispatching, setDispatching] = useState(false);
   async function openRun(id: string) {
     setError("");
     try { setDetail(await api<Record<string, any>>("/api/v1/runs/" + id)); setLocale("id"); }
     catch (e) { setError(e instanceof Error ? e.message : "Gagal memuat detail run"); }
   }
+  async function dispatchDelivery() {
+    if (!detail || !window.confirm("Kirim payload tersimpan ke blog? Ini dapat membuat konten remote.")) return;
+    setDispatching(true); setError("");
+    try {
+      await api("/api/v1/runs/" + detail.id + "/delivery", { method: "POST", body: JSON.stringify({ execution_mode: detail.execution_mode }) }, csrf);
+      await openRun(detail.id);
+    } catch (e) { setError(e instanceof Error ? e.message : "Delivery gagal; periksa status outbox."); }
+    finally { setDispatching(false); }
+  }
   const article = detail?.pair?.articles?.find((item: any) => item.locale === locale);
-  return <section className="space-y-5"><div><h2 className="section-title">Run history</h2><p className="section-subtitle">Outcome pipeline, keputusan editorial, status pasangan bahasa, dan deadline.</p></div>{error && <ErrorText>{error}</ErrorText>}{runs.length ? <div className="panel overflow-hidden"><RunTable runs={runs} blogs={blogs} onOpen={openRun} /></div> : <EmptyState title="Belum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}{detail && <Modal title={detail.pair?.topic ?? "Detail run"} onClose={() => setDetail(null)}><div className="space-y-4"><div className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4"><MetricSmall label="Status" value={detail.status} /><MetricSmall label="Keputusan" value={detail.editorial_decision ?? "pending"} /><MetricSmall label="Outcome" value={detail.pipeline_outcome ?? "—"} /><MetricSmall label="Pair" value={detail.pair_completeness ?? "none"} /></div>{detail.pair ? <><div className="flex items-center justify-between gap-3"><div><p className="font-semibold">{detail.pair.topic}</p><p className="mt-1 text-xs text-slate-500">{detail.pair.research_question}</p></div><div className="flex gap-2"><button className={locale === "id" ? "primary-button" : "secondary-button"} onClick={() => setLocale("id")}>ID</button><button className={locale === "en" ? "primary-button" : "secondary-button"} onClick={() => setLocale("en")}>EN</button></div></div>{article && <div className="rounded-2xl border border-slate-200 p-5"><h3 className="text-lg font-bold">{article.title}</h3><p className="mt-2 text-sm text-slate-500">{article.summary}</p><pre className="mt-5 max-h-[55vh] overflow-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{article.body}</pre></div>}<details className="rounded-xl bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-semibold">Hasil review dan kebijakan</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5">{JSON.stringify(detail.pair.review, null, 2)}</pre></details></> : <p className="text-sm text-slate-500">Run ini belum menghasilkan pasangan artikel.</p>}</div></Modal>}</section>;
+  async function reconcileDelivery(intentId: string, outcome: "succeeded" | "failed") {
+    if (!detail) return;
+    let remoteId: string | null = null;
+    if (outcome === "succeeded") {
+      const value = window.prompt("Remote ID artikel (opsional)");
+      if (value === null) return;
+      remoteId = value.trim() || null;
+    } else if (!window.confirm("Tandai intent ini gagal dan boleh di-retry?")) return;
+    setDispatching(true); setError("");
+    try {
+      await api(`/api/v1/runs/${detail.id}/delivery/${intentId}/reconcile`, { method: "POST", body: JSON.stringify({ outcome, remote_id: remoteId }) }, csrf);
+      await openRun(detail.id);
+    } catch (e) { setError(e instanceof Error ? e.message : "Rekonsiliasi gagal"); }
+    finally { setDispatching(false); }
+  }
+  const pendingDelivery = detail?.deliveries?.some((item: any) => item.state === "prepared" || item.state === "failed");
+  return <section className="space-y-5"><div><h2 className="section-title">Run history</h2><p className="section-subtitle">Outcome pipeline, keputusan editorial, status pasangan bahasa, dan deadline.</p></div>{error && <ErrorText>{error}</ErrorText>}{runs.length ? <div className="panel overflow-hidden"><RunTable runs={runs} blogs={blogs} onOpen={openRun} /></div> : <EmptyState title="Belum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}{detail && <Modal title={detail.pair?.topic ?? "Detail run"} onClose={() => setDetail(null)}><div className="space-y-4"><div className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4"><MetricSmall label="Status" value={detail.status} /><MetricSmall label="Keputusan" value={detail.editorial_decision ?? "pending"} /><MetricSmall label="Outcome" value={detail.pipeline_outcome ?? "—"} /><MetricSmall label="Pair" value={detail.pair_completeness ?? "none"} /><MetricSmall label="Mode" value={detail.execution_mode ?? "dryrun"} /></div>{detail.deliveries?.length > 0 && <div className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Delivery outbox</p>{detail.execution_mode !== "dryrun" && pendingDelivery && <button className="secondary-button" disabled={dispatching} onClick={() => void dispatchDelivery()}>{dispatching ? "Mengirim…" : "Kirim ke blog"}</button>}</div><div className="mt-3 space-y-2">{detail.deliveries.map((item: any) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs"><span className="font-medium">{item.unit_key}</span><span className="status-pill status-blue">{item.action}</span><span>{item.state}</span><span className="text-slate-500">{item.remote_status ?? "—"} · {item.remote_id ?? "belum ada remote ID"} · {item.attempts} attempt</span>{(item.state === "unknown" || item.state === "dispatching") && <span className="flex gap-2"><button className="font-semibold text-teal-700" onClick={() => void reconcileDelivery(item.id, "succeeded")}>Sukses</button><button className="font-semibold text-rose-700" onClick={() => void reconcileDelivery(item.id, "failed")}>Gagal</button></span>}</div>)}</div>{detail.execution_mode === "dryrun" ? <p className="mt-3 text-xs leading-5 text-slate-500">Run dry-run hanya menyiapkan intent; tidak ada request yang dikirim ke blog.</p> : <p className="mt-3 text-xs leading-5 text-slate-500">Status remote belum diverifikasi. Request sukses hanya berarti payload diterima API.</p>}</div>}{detail.pair ? <><div className="flex items-center justify-between gap-3"><div><p className="font-semibold">{detail.pair.topic}</p><p className="mt-1 text-xs text-slate-500">{detail.pair.research_question}</p></div><div className="flex gap-2"><button className={locale === "id" ? "primary-button" : "secondary-button"} onClick={() => setLocale("id")}>ID</button><button className={locale === "en" ? "primary-button" : "secondary-button"} onClick={() => setLocale("en")}>EN</button></div></div>{article && <div className="rounded-2xl border border-slate-200 p-5"><h3 className="text-lg font-bold">{article.title}</h3><p className="mt-2 text-sm text-slate-500">{article.summary}</p><pre className="mt-5 max-h-[55vh] overflow-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{article.body}</pre></div>}<details className="rounded-xl bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-semibold">Hasil review dan kebijakan</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5">{JSON.stringify(detail.pair.review, null, 2)}</pre></details></> : <p className="text-sm text-slate-500">Run ini belum menghasilkan pasangan artikel.</p>}</div></Modal>}</section>;
 }
 
 function RunTable({ runs, blogs, onOpen }: { runs: Run[]; blogs: Blog[]; onOpen?: (id: string) => void }) {

@@ -18,18 +18,19 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities
-from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, OpenApiLoader, build_create_payload, infer_collection_path, infer_response_mapping, normalize_records
+from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
+from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, OpenApiLoader, Operation, build_create_payload, get_path, infer_collection_path, infer_response_mapping, normalize_records
 from takumi_research_agent.config import Settings
+from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, GlobalSettings, ProviderProfile, Run
+from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, GlobalSettings, ProviderProfile, Run, RunEvent
 from takumi_research_agent.orchestration.scheduler import _snapshot
 from takumi_research_agent.providers.anthropic_native import AnthropicProvider
 from takumi_research_agent.providers.base import ModelMessage, ProviderConfig
 from takumi_research_agent.providers.openai_compatible import OpenAICompatibleProvider
 from takumi_research_agent.security import SecretCipher, hash_password, verify_password
 
-from .schemas import AdapterReadTestRequest, BlogRequest, BootstrapRequest, GlobalControlRequest, LoginRequest, MappingPreviewRequest, ProviderRequest
+from .schemas import AdapterCreateOperationRequest, AdapterCreateTestRequest, AdapterReadTestRequest, BlogRequest, BootstrapRequest, DeliveryDispatchRequest, DeliveryReconcileRequest, GlobalControlRequest, LoginRequest, ManualRunRequest, MappingPreviewRequest, ProviderRequest
 
 SESSION_COOKIE = "takumi_session"
 SESSION_TTL_HOURS = 12
@@ -521,6 +522,127 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
         db.commit()
         return {"validated": True, "records_read": len(posts), "sample": posts[:3], "note": "Read-only capability passed. Create, draft, publish, lookup, and remote schedule capabilities remain unverified."}
 
+    @app.post("/api/v1/blogs/{blog_id}/adapter/create-operation")
+    async def set_create_operation(
+        blog_id: str,
+        body: AdapterCreateOperationRequest,
+        _: tuple[AdminUser, AdminSession] = Depends(require_csrf),
+        db: Session = Depends(get_db),
+    ):
+        item = db.get(BlogProfile, blog_id, with_for_update=True)
+        if item is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Blog profile not found")
+        if not item.api_spec_source:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Configure an OpenAPI contract before selecting a create operation")
+        loader = OpenApiLoader(allowed_hosts=set(settings.allowed_private_hosts))
+        try:
+            contract = await loader.load(item.api_spec_source, base_url_override=item.base_url)
+        except Exception as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"OpenAPI contract load failed: {type(exc).__name__}: {str(exc)[:300]}") from exc
+        finally:
+            await loader.close()
+        operation = next((op for op in contract.operations if op.operation_id == body.create_operation_id), None)
+        if operation is None or operation.method not in {"post", "put"}:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Selected operation is missing or is not a POST/PUT")
+        previous_operation = (item.capabilities or {}).get("create_operation")
+        if previous_operation == operation.model_dump():
+            return {"create_operation": operation.model_dump(), "revision": item.revision, "note": "Create operation unchanged."}
+        item.capabilities = {**item.capabilities, "create_operation": operation.model_dump()}
+        item.revision += 1
+        item.capability_result = {
+            key: value
+            for key, value in item.capability_result.items()
+            if key not in {"create_draft", "sandbox_create", "create_tested_at", "create_http_status", "create_remote_id", "create_error", "create_operation_id"}
+        }
+        item.capability_result = {**item.capability_result, "create_operation_id": operation.operation_id}
+        if item.validated_at is not None:
+            item.validated_revision = item.revision
+        db.commit()
+        db.refresh(item)
+        return {"create_operation": operation.model_dump(), "revision": item.revision, "note": "Create capability is still unproven until a sandbox create succeeds."}
+
+    @app.post("/api/v1/blogs/{blog_id}/adapter/test-create")
+    async def test_blog_create(
+        blog_id: str,
+        body: AdapterCreateTestRequest,
+        _: tuple[AdminUser, AdminSession] = Depends(require_csrf),
+        db: Session = Depends(get_db),
+    ):
+        """Prove draft-create capability with one explicit, operator-acknowledged sandbox write."""
+        if not body.acknowledge_remote_write:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Explicit acknowledgment is required before a remote write")
+        item = db.get(BlogProfile, blog_id)
+        if item is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Blog profile not found")
+        control = db.get(GlobalSettings, 1)
+        if control is None or control.recovery_mode:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Recovery mode blocks capability tests")
+        if control.content_mutations_paused:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Open the global content pause only for an explicit sandbox test")
+        if not item.capability_result.get("history_complete"):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Validate complete history before testing a create")
+        if not settings.master_key:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Credential master key is not configured")
+        try:
+            mapping = BlogMapping.model_validate(item.adapter_mapping)
+            raw_create = (item.capabilities or {}).get("create_operation")
+            raw_list = (item.capabilities or {}).get("list_operation")
+            if not isinstance(raw_create, dict) or not isinstance(raw_list, dict):
+                raise ValueError("Create and list operations must be selected before testing create")
+            create_operation = Operation.model_validate(raw_create)
+            list_operation = Operation.model_validate(raw_list)
+            token = SecretCipher(settings.master_key).decrypt(item.encrypted_api_token) if item.encrypted_api_token else ""
+        except (ValueError, ContractError) as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300]) from exc
+        host = (urlsplit(item.base_url).hostname or "").lower()
+        adapter = BlogApiAdapter(
+            base_url=item.base_url,
+            token=token,
+            mapping=mapping,
+            list_operation=list_operation,
+            create_operation=create_operation,
+            auth_header=item.auth_header,
+            auth_scheme=item.auth_scheme,
+            capabilities=BlogCapabilities(list_posts=True, create_draft=True),
+            allow_insecure_private=host in settings.allowed_private_hosts,
+        )
+        marker = f"Takumi capability check {datetime.now(timezone.utc).isoformat(timespec='seconds')}"
+        remote_id: str | None = None
+        try:
+            canonical = {"title": marker[:180], "content": "Sandbox capability check. This draft is safe to delete.", "summary": "Sandbox capability check.", "locale": "en", "language": "en", "status": "draft"}
+            payload = build_create_payload(canonical, mapping)
+            result = await adapter.send_payload(payload, intent_key=f"takumi-capability-{secrets.token_urlsafe(18)}", publish=False)
+        except DeliveryOutcomeUnknown as exc:
+            item.capability_result = {**item.capability_result, "create_draft": False, "sandbox_create": False, "create_tested_at": datetime.now(timezone.utc).isoformat(), "create_error": str(exc)[:200]}
+            db.commit()
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Create outcome is unknown; reconcile on the blog before retrying") from exc
+        except Exception as exc:
+            item.capability_result = {**item.capability_result, "create_draft": False, "sandbox_create": False, "create_tested_at": datetime.now(timezone.utc).isoformat(), "create_error": type(exc).__name__}
+            db.commit()
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Create capability test failed: {type(exc).__name__}") from exc
+        finally:
+            await adapter.close()
+        id_path = mapping.response_fields.get("id")
+        if id_path:
+            value = get_path(result.get("body"), id_path)
+            remote_id = str(value)[:300] if value not in (None, "") else None
+        item.capability_result = {
+            **item.capability_result,
+            "create_draft": True,
+            "sandbox_create": True,
+            "create_tested_at": datetime.now(timezone.utc).isoformat(),
+            "create_http_status": result.get("http_status"),
+            "create_remote_id": remote_id,
+        }
+        db.commit()
+        return {
+            "create_draft": True,
+            "http_status": result.get("http_status"),
+            "remote_id": remote_id,
+            "request_payload": payload,
+            "note": "One remote draft was created. This proves a single create only; publish, idempotency, lookup, and sustained reliability remain unproven.",
+        }
+
     @app.post("/api/v1/blogs/{blog_id}/adapter/preview")
     def preview_mapping(blog_id: str, body: MappingPreviewRequest, _: tuple[AdminUser, AdminSession] = Depends(require_csrf), db: Session = Depends(get_db)):
         item = db.get(BlogProfile, blog_id)
@@ -571,6 +693,7 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                 "editorial_decision": item.editorial_decision,
                 "pair_completeness": item.pair_completeness,
                 "deadline_result": item.deadline_result,
+                "execution_mode": item.execution_mode,
                 "created_at": item.created_at.isoformat(),
             }
             for item in db.scalars(select(Run).order_by(Run.created_at.desc()).limit(limit))
@@ -579,9 +702,11 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
     @app.post("/api/v1/blogs/{blog_id}/runs", status_code=status.HTTP_202_ACCEPTED)
     def create_manual_run(
         blog_id: str,
+        body: ManualRunRequest | None = None,
         _: tuple[AdminUser, AdminSession] = Depends(require_csrf),
         db: Session = Depends(get_db),
     ):
+        execution_mode = body.execution_mode if body is not None else "dryrun"
         blog = db.get(BlogProfile, blog_id)
         if blog is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Blog profile not found")
@@ -610,7 +735,7 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             target_at=now + timedelta(hours=1),
             status="queued",
             stage="queued",
-            execution_mode="dryrun",
+            execution_mode=execution_mode,
             config_snapshot=_snapshot(blog, provider),
             pipeline_outcome="queued",
             deadline_result="pending",
@@ -619,6 +744,113 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
         db.add(run)
         db.commit()
         return {"run_id": run.id, "status": run.status, "execution_mode": run.execution_mode}
+
+    @app.post("/api/v1/runs/{run_id}/delivery")
+    async def dispatch_delivery(
+        run_id: str,
+        body: DeliveryDispatchRequest,
+        _: tuple[AdminUser, AdminSession] = Depends(require_csrf),
+        db: Session = Depends(get_db),
+    ):
+        run = db.get(Run, run_id)
+        if run is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
+        if run.execution_mode != body.execution_mode:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Run execution mode does not match the requested delivery mode")
+        blog = db.get(BlogProfile, run.blog_id)
+        if blog is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Blog profile not found")
+        if not settings.master_key:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Credential master key is not configured")
+        try:
+            mapping = BlogMapping.model_validate(blog.adapter_mapping)
+            raw_create = (blog.capabilities or {}).get("create_operation")
+            raw_list = (blog.capabilities or {}).get("list_operation")
+            if not isinstance(raw_create, dict) or not isinstance(raw_list, dict):
+                raise ValueError("Create and list operations must be selected before delivery")
+            create_operation = Operation.model_validate(raw_create)
+            list_operation = Operation.model_validate(raw_list)
+            token = SecretCipher(settings.master_key).decrypt(blog.encrypted_api_token) if blog.encrypted_api_token else ""
+        except (ValueError, ContractError) as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300]) from exc
+        host = (urlsplit(blog.base_url).hostname or "").lower()
+        adapter = BlogApiAdapter(
+            base_url=blog.base_url,
+            token=token,
+            mapping=mapping,
+            list_operation=list_operation,
+            create_operation=create_operation,
+            auth_header=blog.auth_header,
+            auth_scheme=blog.auth_scheme,
+            capabilities=BlogCapabilities(
+                list_posts=True,
+                create_draft=bool(blog.capability_result.get("create_draft")),
+                publish=bool(blog.capability_result.get("publish")),
+                idempotency_key=bool(blog.capability_result.get("idempotency_key")),
+            ),
+            allow_insecure_private=host in settings.allowed_private_hosts,
+        )
+        try:
+            summary = await DeliveryService().dispatch(db, run_id=run_id, adapter=adapter)
+        except DeliveryBlocked as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"{exc.code}: {exc.detail}") from exc
+        finally:
+            await adapter.close()
+        return {
+            "run_id": run_id,
+            "execution_mode": run.execution_mode,
+            **summary,
+            "note": "A successful request means the blog accepted the payload; remote status is not verified until a read capability check confirms it.",
+        }
+
+    @app.post("/api/v1/runs/{run_id}/delivery/{intent_id}/reconcile")
+    def reconcile_delivery(
+        run_id: str,
+        intent_id: str,
+        body: DeliveryReconcileRequest,
+        _: tuple[AdminUser, AdminSession] = Depends(require_csrf),
+        db: Session = Depends(get_db),
+    ):
+        """Resolve an operation whose remote outcome is unknown; never creates a new intent."""
+        intent = db.get(DeliveryIntent, intent_id)
+        if intent is None or intent.run_id != run_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Delivery intent not found")
+        if intent.state not in {"unknown", "dispatching"}:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Only unknown or stale dispatching intents can be reconciled")
+        now = datetime.now(timezone.utc)
+        intent.state = "succeeded" if body.outcome == "succeeded" else "failed"
+        if body.remote_id:
+            intent.remote_id = body.remote_id[:300]
+        intent.response_summary = {
+            "reconciled": True,
+            "outcome": body.outcome,
+            "remote_id": intent.remote_id,
+            "note": (body.note or "")[:500],
+        }
+        ledger = db.scalar(
+            select(ContentLedger).where(
+                ContentLedger.blog_id == intent.blog_id,
+                ContentLedger.pair_id == intent.pair_id,
+                ContentLedger.unit_key == intent.unit_key,
+            )
+        )
+        if ledger is not None:
+            if body.outcome == "succeeded":
+                ledger.local_state = "delivered"
+                ledger.remote_status = "accepted_unverified"
+                ledger.remote_id = intent.remote_id
+                ledger.verified_at = now
+            else:
+                ledger.local_state = "delivery_failed"
+        db.add(
+            RunEvent(
+                run_id=run_id,
+                event_type="delivery_reconciled",
+                details={"intent_id": intent.id, "unit_key": intent.unit_key, "outcome": body.outcome, "remote_id": intent.remote_id, "note": (body.note or "")[:300]},
+            )
+        )
+        db.commit()
+        return {"intent_id": intent.id, "state": intent.state, "remote_id": intent.remote_id, "outcome": body.outcome}
 
     @app.get("/api/v1/runs/{run_id}")
     def get_run_details(run_id: str, _: tuple[AdminUser, AdminSession] = Depends(get_auth), db: Session = Depends(get_db)):
@@ -636,15 +868,38 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                     "body": version.final_body,
                     "body_hash": version.body_hash,
                 })
+        deliveries = []
+        for intent in db.scalars(select(DeliveryIntent).where(DeliveryIntent.run_id == run_id).order_by(DeliveryIntent.unit_key)):
+            ledger = db.scalar(
+                select(ContentLedger).where(
+                    ContentLedger.blog_id == intent.blog_id,
+                    ContentLedger.pair_id == intent.pair_id,
+                    ContentLedger.unit_key == intent.unit_key,
+                )
+            )
+            deliveries.append({
+                "id": intent.id,
+                "unit_key": intent.unit_key,
+                "action": intent.action,
+                "state": intent.state,
+                "remote_id": intent.remote_id,
+                "remote_status": ledger.remote_status if ledger else None,
+                "local_state": ledger.local_state if ledger else None,
+                "operation_id": intent.operation_id,
+                "attempts": db.scalar(select(func.count()).select_from(DeliveryAttempt).where(DeliveryAttempt.intent_id == intent.id)) or 0,
+                "response": intent.response_summary,
+            })
         return {
             "id": run.id,
             "blog_id": run.blog_id,
             "status": run.status,
             "stage": run.stage,
+            "execution_mode": run.execution_mode,
             "pipeline_outcome": run.pipeline_outcome,
             "editorial_decision": run.editorial_decision,
             "pair_completeness": run.pair_completeness,
             "deadline_result": run.deadline_result,
+            "deliveries": deliveries,
             "pair": None if pair is None else {
                 "id": pair.id,
                 "topic": pair.topic,
