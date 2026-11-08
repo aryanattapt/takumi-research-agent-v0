@@ -208,9 +208,9 @@ async def test_changed_article_body_invalidates_the_approval():
         service.prepare(session, run_id="run-1")
     adapter = FakeAdapter(BlogMapping.model_validate(MAPPING))
     with sessions.begin() as session:
-        version = session.query(ArticleVersion).filter_by(locale="en").one()
-        version.final_body = "Silently edited body that was never reviewed."
-        version.body_hash = hashlib.sha256(version.final_body.encode()).hexdigest()
+        for version in session.query(ArticleVersion).all():
+            version.final_body = f"Silently edited {version.locale} body that was never reviewed."
+            version.body_hash = hashlib.sha256(version.final_body.encode()).hexdigest()
 
     with sessions() as session:
         summary = await service.dispatch(session, run_id="run-1", adapter=adapter)
