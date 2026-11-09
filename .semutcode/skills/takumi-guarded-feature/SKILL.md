@@ -27,7 +27,7 @@ Menambahkan satu fitur end-to-end ke Takumi tanpa melemahkan invariant riset/edi
        print(m, bool(importlib.util.find_spec(m)))
    EOF
    ```
-   Jika dependency tidak ada, jangan paksa install; verifikasi dengan `compileall` dan katakan test tidak dijalankan.
+   Jika dependency benar-benar tidak ada, jangan paksa install; verifikasi dengan `compileall` dan katakan test tidak dijalankan. Di mesin ini dependency dev dan `tzdata` sudah terpasang, jadi test _bisa_ dijalankan dengan `PYTHONPATH=src` (paket tidak di-install ke interpreter).
 
 2. Baca desain sebelum kode: `docs/planning/plan.md` §9.6 (capability matrix), §9.7 (unit pengiriman), §12.4 (idempotency/outbox), §12.5 (approval), dan `docs/planning/review.md` §10. Invariant di sana adalah acceptance, bukan saran.
 
@@ -92,7 +92,9 @@ Menambahkan satu fitur end-to-end ke Takumi tanpa melemahkan invariant riset/edi
 
 ```
 python -m compileall -q src tests
-python -m pytest tests/test_<domain>.py -q    # hanya jika dependency terpasang
+PYTHONPATH=src python -m pytest tests/test_<domain>.py    # paket tidak di-install ke interpreter lokal
 ```
+
+Gerbang lengkap (pytest, roundtrip migrasi sqlite, build dashboard) ada di `bash .semutcode/skills/jalur/takumi-resume-milestone/scripts/verify-local.sh`.
 
 Acceptance: prepare mengembalikan intent deterministik dan idempoten; dispatch sukses mencatat attempt + remote ID + ledger; pause/dry-run/capability/fingerprint memblokir tanpa panggilan adapter; state `unknown` tidak terkirim ulang saat dispatch dijalankan lagi.
