@@ -23,7 +23,7 @@ from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, Op
 from takumi_research_agent.config import Settings
 from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, GlobalSettings, ProviderProfile, Run, RunEvent
+from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, RunEvent
 from takumi_research_agent.orchestration.capacity import (
     DEFAULT_CONCURRENCY,
     DEFAULT_RUN_MINUTES,
@@ -34,6 +34,7 @@ from takumi_research_agent.orchestration.capacity import (
     capacity_report,
 )
 from takumi_research_agent.orchestration.scheduler import _snapshot
+from takumi_research_agent.operations.backup import artifact_integrity_report, last_restore_report
 from takumi_research_agent.providers.anthropic_native import AnthropicProvider
 from takumi_research_agent.providers.base import ModelMessage, ProviderConfig
 from takumi_research_agent.providers.openai_compatible import OpenAICompatibleProvider
@@ -720,6 +721,28 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             }
             for item in db.scalars(select(Run).order_by(Run.created_at.desc()).limit(limit))
         ]
+
+    @app.get("/api/v1/recovery")
+    def get_recovery(
+        verify_artifacts: bool = False,
+        _: tuple[AdminUser, AdminSession] = Depends(get_auth),
+        db: Session = Depends(get_db),
+    ):
+        control = db.get(GlobalSettings, 1)
+        recovery_mode = True if control is None else control.recovery_mode
+        # Hashing every artifact is I/O heavy, so the dashboard polls the cheap view and asks
+        # for a full check on demand (or always during recovery mode).
+        if recovery_mode or verify_artifacts:
+            artifacts = artifact_integrity_report(db, artifacts_root=settings.data_dir / "artifacts")
+        else:
+            total = db.scalar(select(func.count()).select_from(EvidenceSpanRecord)) or 0
+            artifacts = {"checked": False, "total": total, "verified": None, "missing": [], "corrupt": [], "truncated": False}
+        return {
+            "recovery_mode": recovery_mode,
+            "content_mutations_paused": True if control is None else control.content_mutations_paused,
+            "artifacts": artifacts,
+            "last_restore": last_restore_report(db),
+        }
 
     @app.get("/api/v1/capacity")
     def get_capacity(

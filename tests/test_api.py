@@ -161,3 +161,29 @@ def test_manual_run_is_queued_as_dryrun_and_details_are_readable():
         assert detail.json()["status"] == "queued"
         assert detail.json()["pair"] is None
     engine.dispose()
+
+
+def test_recovery_endpoint_reports_artifact_integrity_and_last_restore(tmp_path):
+    engine, sessions = create_database("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    settings = replace(
+        Settings.from_env(env_file=None),
+        master_key="test-master-key-" * 4,
+        session_cookie_secure=False,
+        data_dir=tmp_path / "data",
+    )
+    app = create_app(settings, engine=engine, sessions=sessions)
+    with TestClient(app) as client:
+        client.post("/api/v1/setup/admin", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        client.post("/api/v1/auth/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        response = client.get("/api/v1/recovery")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["recovery_mode"] is False
+        assert body["artifacts"] == {"checked": False, "total": 0, "verified": None, "missing": [], "corrupt": [], "truncated": False}
+        checked = client.get("/api/v1/recovery?verify_artifacts=true")
+        assert checked.status_code == 200
+        assert checked.json()["artifacts"]["checked"] is True
+        assert checked.json()["artifacts"]["verified"] == 0
+        assert body["last_restore"] is None
+    engine.dispose()

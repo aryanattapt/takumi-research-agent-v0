@@ -73,3 +73,36 @@ export type CapacityReport = {
   infeasible_run_ids: string[];
   slots: CapacitySlot[];
 };
+
+export type ArtifactIntegrity = {
+  checked: boolean;
+  total: number;
+  verified: number | null;
+  missing: string[];
+  corrupt: string[];
+  truncated: boolean;
+};
+
+export type RestoreReport = {
+  backup_id: string;
+  created_at?: string;
+  restored_at?: string;
+  schema_revision?: { backup: string | null; current: string | null };
+  tables?: Record<string, number>;
+  artifacts?: ArtifactIntegrity;
+  master_key_present?: boolean;
+  blocked_runs?: string[];
+  unknown_intents?: string[];
+  profiles_requiring_revalidation?: string[];
+  providers_requiring_recredential?: string[];
+  blogs_requiring_recredential?: string[];
+  schedule_cancel_or_resync_review?: string[];
+  recovery_mode?: boolean;
+};
+
+export type RecoveryStatus = {
+  recovery_mode: boolean;
+  content_mutations_paused: boolean;
+  artifacts: ArtifactIntegrity;
+  last_restore: RestoreReport | null;
+};

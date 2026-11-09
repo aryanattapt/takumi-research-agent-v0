@@ -19,7 +19,8 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
 | Publish bila didukung jurnal; selain itu draft | Outbox delivery dan approval fingerprint tersedia; eksekusi remote tetap menunggu kontrak blog dan capability create/publish yang terbukti |
 | Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
-| Evaluasi kualitas model dan backup/restore | Belum selesai |
+| Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
+| Evaluasi kualitas model | Belum selesai |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -58,6 +59,23 @@ Lead time tidak menjamin semua profil selesai tepat waktu. Worker menghitung ula
 
 `WORKER_CONCURRENCY` (1–16 lane) dan `CAPACITY_RUN_MINUTES` (estimasi wall-clock per run, default 45) dibaca oleh worker dan API, jadi setel keduanya dengan nilai yang sama. `GET /api/v1/capacity` menampilkan rencana antrean tanpa mengubah run, dan Run history menampilkan kolom Kapasitas beserta `start_by_at`.
 
+## Backup dan recovery
+
+Backup dijalankan dari CLI pada deployment yang berjalan:
+
+1. `takumi backup` menulis satu direktori di `DATA_DIR/backups/<backup_id>/` berisi snapshot logis database (`database.json`), salinan setiap artifact evidence (`artifacts/<kind>/<digest>`), dan `manifest.json` dengan SHA-256 tiap file serta schema revision Alembic. Master key hanya dirujuk namanya (`TAKUMI_MASTER_KEY`) dan tidak pernah disimpan.
+2. `takumi verify-backup <path>` memeriksa ulang hash setiap file, jumlah baris per tabel, dan kecocokan schema revision. Backup yang tidak lolos tidak boleh dipakai.
+3. `takumi restore <path> --acknowledge` menolak backup yang gagal verifikasi maupun schema revision yang berbeda. Setelah data diganti, deployment dipaksa ke recovery mode (`recovery_mode=true`, `content_mutations_paused=true`, revision kontrol naik).
+
+Selama recovery mode, lease lama dibatalkan, run yang sedang berjalan menjadi `blocked` dengan stage `restore_recovery`, dan intent yang masih `dispatching` ditandai `unknown` tanpa dikirim ulang. Operator masih harus:
+
+1. Memulihkan `TAKUMI_MASTER_KEY` dari tempat terpisah, lalu memastikan kredensial provider dan blog bisa didekripsi (`providers_requiring_recredential`, `blogs_requiring_recredential`).
+2. Menyinkronkan ulang history blog dan jadwal remote profil pada `schedule_cancel_or_resync_review`.
+3. Mereview intent `unknown` dan profil pada `profiles_requiring_revalidation`.
+4. Baru setelah itu menonaktifkan recovery mode lewat prosedur terkontrol. Slot yang terlewat tidak di-backfill otomatis.
+
+Laporan restore terakhir tersedia di `GET /api/v1/recovery` dan panel "Backup dan recovery" pada halaman Kontrol sistem.
+
 ## Jalankan lokal untuk development
 
 Persyaratan: Python 3.11+, Node.js 22+, PostgreSQL, dan Chromium Playwright jika headless browser digunakan.
@@ -80,6 +98,9 @@ Perintah layanan:
 | takumi migrate | Terapkan migrasi database. |
 | takumi api | Jalankan FastAPI dan dashboard production build. |
 | takumi worker | Jalankan coordinator jadwal dan worker pipeline. |
+| takumi backup | Snapshot konsisten database + salinan artifact yang dirujuk, plus manifest ber-hash. |
+| takumi verify-backup &lt;path&gt; | Verifikasi ulang hash semua file backup tanpa menyentuh database. |
+| takumi restore &lt;path&gt; --acknowledge | Ganti data lokal dengan backup terverifikasi, lalu masuk recovery mode. |
 
 ## Guard dan batas integrasi
 
@@ -89,6 +110,8 @@ Perintah layanan:
 - Outcome `unknown` tidak di-retry otomatis; rekonsiliasi operator dicatat dengan audit trail dan tidak membuat payload/key baru.
 - Admission control hanya menulis field jadwal lokal (`next_run_at`, `start_by_at`, `capacity_state`). Slot `at_risk` dan `infeasible` dilaporkan apa adanya; tidak ada pekerjaan tambahan yang dikirim ke provider untuk mengejar deadline.
 - Mapping API adalah JSONPath subset, bukan kode executable.
+- Backup memuat manifest ber-hash untuk database dan setiap artifact yang dirujuk; restore menolak backup yang tidak lolos verifikasi dan tidak pernah menyalin master key.
+- Setelah restore, deployment selalu berada di recovery mode: lease lama dibatalkan, intent yang masih `dispatching` menjadi `unknown` dan tidak dikirim ulang otomatis, dan profil tetap nonaktif sampai laporan recovery diselesaikan operator.
 - History pagination yang berulang, tidak maju, atau tidak lengkap memblokir keputusan novelty.
 - Source quote harus cocok dengan artifact content-addressed sebelum dipakai sebagai evidence.
 - DOI, indeks jurnal, atau peer-review policy tingkat jurnal bukan bukti tunggal bahwa semua klaim paper benar.
@@ -117,6 +140,7 @@ Test menguji agent runtime, mapping/pagination blog, policy editorial, outbox de
 | src/takumi_research_agent/editorial | Penulis bilingual, critic, sanitizer, dan final body |
 | src/takumi_research_agent/orchestration | Jadwal slot, admission control kapasitas, worker lease, dan research-to-local-draft pipeline |
 | src/takumi_research_agent/delivery | Outbox intent, approval fingerprint, dan dispatcher bertingkat capability |
+| src/takumi_research_agent/operations | Backup, verifikasi manifest, restore, dan laporan recovery |
 | src/takumi_research_agent/persistence | SQLAlchemy models, database, dan fenced queue |
 | migrations | Schema versi Alembic |
 | web | React/TypeScript dashboard |

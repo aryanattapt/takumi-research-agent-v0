@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -9,11 +10,11 @@ import socket
 from pathlib import Path
 from uuid import uuid4
 
-import uvicorn
 from alembic import command
 from alembic.config import Config
 
 from takumi_research_agent.config import Settings
+from takumi_research_agent.operations.backup import BackupBlocked, create_backup, restore_backup, verify_backup
 from takumi_research_agent.orchestration.capacity import DEFAULT_RUN_MINUTES, MAX_CONCURRENCY, MAX_RUN_MINUTES, MIN_RUN_MINUTES, apply_admission_control
 from takumi_research_agent.orchestration.pipeline import DailyResearchProcessor
 from takumi_research_agent.orchestration.scheduler import RunWorker, enqueue_due_slots
@@ -71,16 +72,79 @@ async def _worker_loop(settings: Settings) -> None:
         logging.info("Takumi worker stopped")
 
 
+def _backup_command(settings: Settings) -> int:
+    engine, sessions = create_database(settings.database_url)
+    try:
+        manifest = create_backup(
+            sessions,
+            artifacts_root=settings.data_dir / "artifacts",
+            output_dir=settings.data_dir / "backups",
+        )
+        print(json.dumps({
+            "backup_id": manifest["backup_id"],
+            "path": str((settings.data_dir / "backups" / manifest["backup_id"]).resolve()),
+            "schema_revision": manifest["schema_revision"],
+            "rows": manifest["database"]["rows"],
+            "artifacts": len(manifest["artifacts"]),
+            "key_reference": manifest["key_reference"],
+        }, indent=2))
+    except BackupBlocked as exc:
+        print(json.dumps({"blocked": exc.code, "detail": exc.detail}, indent=2))
+        return 1
+    finally:
+        engine.dispose()
+    return 0
+
+
+def _verify_command(target: str) -> int:
+    result = verify_backup(Path(target))
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
+def _restore_command(settings: Settings, target: str, acknowledge: bool) -> int:
+    engine, sessions = create_database(settings.database_url)
+    try:
+        with sessions.begin() as session:
+            report = restore_backup(
+                session,
+                backup_path=Path(target),
+                artifacts_root=settings.data_dir / "artifacts",
+                master_key=settings.master_key,
+                acknowledge=acknowledge,
+            )
+        print(json.dumps(report, indent=2))
+    except BackupBlocked as exc:
+        print(json.dumps({"blocked": exc.code, "detail": exc.detail}, indent=2))
+        return 1
+    finally:
+        engine.dispose()
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="takumi", description="Takumi bilingual research agent")
-    parser.add_argument("command", choices=("api", "worker", "migrate"), help="service to start or migration action")
+    parser.add_argument("command", choices=("api", "worker", "migrate", "backup", "verify-backup", "restore"), help="service to start or operational action")
+    parser.add_argument("target", nargs="?", help="backup directory or manifest.json for verify-backup/restore")
+    parser.add_argument("--acknowledge", action="store_true", help="required by restore: replace local data with the backup")
     args = parser.parse_args()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.from_env()
 
+    if args.command in {"verify-backup", "restore"} and not args.target:
+        parser.error(f"{args.command} requires a backup directory or manifest.json path")
+
     if args.command == "migrate":
         command.upgrade(_alembic_config(), "head")
+    elif args.command == "backup":
+        raise SystemExit(_backup_command(settings))
+    elif args.command == "verify-backup":
+        raise SystemExit(_verify_command(args.target))
+    elif args.command == "restore":
+        raise SystemExit(_restore_command(settings, args.target, args.acknowledge))
     elif args.command == "api":
+        import uvicorn
+
         from takumi_research_agent.api.app import create_app
 
         app = create_app(settings)
