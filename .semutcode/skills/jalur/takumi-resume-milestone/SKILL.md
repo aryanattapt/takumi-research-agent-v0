@@ -14,6 +14,7 @@ Menutup satu gap milestone Takumi dari dokumen plan sampai commit yang CI-nya hi
 - User menyebut milestone atau area, misalnya "kerjakan M6", "sisa deadline dan kapasitas", "backup/restore belum ada".
 - User minta "implementasikan status yang masih sebagian di plan".
 - Bukan untuk: mengubah pipeline riset/editorial inti, atau mengaktifkan penulisan remote ke blog.
+- Bila gap yang dipilih berupa operasi data (backup/restore/import/GC), ikuti pola di `../takumi-data-lifecycle-ops/SKILL.md` dan jalankan smoke test-nya di langkah verifikasi.
 
 ## Steps
 
@@ -33,7 +34,7 @@ Menutup satu gap milestone Takumi dari dokumen plan sampai commit yang CI-nya hi
    Base.metadata.create_all(engine)
    ```
    Kalau perilakunya menyentuh deadline/kapasitas, sertakan skenario berskala nyata (mis. 10 profil target sama) dan laporkan angka `ok`/`at_risk`/`infeasible` apa adanya.
-8. **Verifikasi lokal:** `bash .semutcode/skills/jalur/takumi-resume-milestone/scripts/verify-local.sh` (compile, pytest, alembic upgrade→downgrade→upgrade di sqlite, dashboard build).
+8. **Verifikasi lokal:** `bash .semutcode/skills/jalur/takumi-resume-milestone/scripts/verify-local.sh` (compile, pytest, alembic upgrade→downgrade→upgrade di sqlite, dashboard build). Untuk fitur operasi data, tambahkan `python .semutcode/skills/jalur/takumi-data-lifecycle-ops/scripts/ops_smoke.py`.
 9. **Perbarui status hanya untuk perilaku yang benar-benar berubah:** baris milestone di `docs/planning/plan.md` §15.4 dan tabel status di `README.md`. Jangan menandai selesai sesuatu yang masih bergantung dependency eksternal.
 10. **Commit dengan Conventional Commits** (`feat:`, `fix:`, `test:`, `docs:` sesuai isi), satu paket fitur + test + docs:
     ```
