@@ -12,13 +12,14 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | --- | --- |
 | Maksimal 10 blog dan dashboard konfigurasi | Tersedia |
 | Provider OpenAI-compatible dan Anthropic | Adapter tersedia; kredensial/model perlu dikonfigurasi dan di-probe |
-| Jadwal harian default pukul 06:00 Asia/Jakarta | Worker dan slot harian tersedia; mulai menyiapkan 120 menit sebelumnya |
+| Jadwal harian default pukul 06:00 Asia/Jakarta | Worker dan slot harian tersedia; mulai menyiapkan 120 menit sebelumnya, dan admission control menandai slot `at_risk`/`infeasible` bila antrean tidak muat sebelum target |
 | Sinyal tren teknologi dan sains | Hacker News Algolia dan arXiv dengan skor heuristik yang transparan |
 | Riwayat dan mapping JSON blog | GET read-only, OpenAPI operation list, JSONPath terbatas, preview dan pagination |
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
 | Publish bila didukung jurnal; selain itu draft | Outbox delivery dan approval fingerprint tersedia; eksekusi remote tetap menunggu kontrak blog dan capability create/publish yang terbukti |
-| Evaluasi kualitas model, benchmark 10 blog, backup/restore | Belum selesai |
+| Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
+| Evaluasi kualitas model dan backup/restore | Belum selesai |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -46,6 +47,16 @@ Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data
 8. Buka Run history untuk melihat keputusan, hasil review, artikel Indonesia/English, dan status outbox delivery.
 
 Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset.
+
+### Kapasitas dan deadline
+
+Lead time tidak menjamin semua profil selesai tepat waktu. Worker menghitung ulang antrean setiap loop dengan urutan earliest-deadline-first dan menulis hasilnya ke setiap run:
+
+- `capacity_state=ok` berarti run muat sebelum target.
+- `capacity_state=at_risk` berarti antrean melewati waktu mulai paling lambat (`start_by_at`); solusinya menambah lane, menaikkan lead time, atau mengurangi profil yang aktif pada jam yang sama.
+- `capacity_state=infeasible` berarti target lebih dekat daripada satu run, sehingga deadline tidak mungkin dipenuhi; ini dilaporkan, bukan dikejar dengan retry.
+
+`WORKER_CONCURRENCY` (1–16 lane) dan `CAPACITY_RUN_MINUTES` (estimasi wall-clock per run, default 45) dibaca oleh worker dan API, jadi setel keduanya dengan nilai yang sama. `GET /api/v1/capacity` menampilkan rencana antrean tanpa mengubah run, dan Run history menampilkan kolom Kapasitas beserta `start_by_at`.
 
 ## Jalankan lokal untuk development
 
@@ -76,6 +87,7 @@ Perintah layanan:
 - Delivery hanya berjalan dari outbox intent yang sudah tersimpan; approval fingerprint harus masih cocok dengan body, review, evidence/source, mapping, editorial settings, jadwal, dan destination.
 - Dry-run tidak pernah mengirim request ke blog. Eksekusi sandbox/live tetap ditahan oleh pause, recovery mode, dan capability create/publish yang belum terbukti.
 - Outcome `unknown` tidak di-retry otomatis; rekonsiliasi operator dicatat dengan audit trail dan tidak membuat payload/key baru.
+- Admission control hanya menulis field jadwal lokal (`next_run_at`, `start_by_at`, `capacity_state`). Slot `at_risk` dan `infeasible` dilaporkan apa adanya; tidak ada pekerjaan tambahan yang dikirim ke provider untuk mengejar deadline.
 - Mapping API adalah JSONPath subset, bukan kode executable.
 - History pagination yang berulang, tidak maju, atau tidak lengkap memblokir keputusan novelty.
 - Source quote harus cocok dengan artifact content-addressed sebelum dipakai sebagai evidence.
@@ -103,7 +115,7 @@ Test menguji agent runtime, mapping/pagination blog, policy editorial, outbox de
 | src/takumi_research_agent/discovery | Trend collector Hacker News/arXiv dan skor heuristik |
 | src/takumi_research_agent/research | Retriever, browser fallback, artifacts, evidence, serta research tools |
 | src/takumi_research_agent/editorial | Penulis bilingual, critic, sanitizer, dan final body |
-| src/takumi_research_agent/orchestration | Jadwal slot, worker lease, dan research-to-local-draft pipeline |
+| src/takumi_research_agent/orchestration | Jadwal slot, admission control kapasitas, worker lease, dan research-to-local-draft pipeline |
 | src/takumi_research_agent/delivery | Outbox intent, approval fingerprint, dan dispatcher bertingkat capability |
 | src/takumi_research_agent/persistence | SQLAlchemy models, database, dan fenced queue |
 | migrations | Schema versi Alembic |

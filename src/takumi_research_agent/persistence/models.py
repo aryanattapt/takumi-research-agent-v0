@@ -138,6 +138,11 @@ class Run(Base):
     editorial_decision: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     pair_completeness: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
     deadline_result: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    # Deadline admission control (orchestration/capacity.py): schedule version frozen at enqueue,
+    # the latest honest start that still meets target_at, and the current capacity verdict.
+    schedule_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    capacity_state: Mapped[str] = mapped_column(String(20), default="ok", nullable=False)
+    start_by_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_owner: Mapped[str | None] = mapped_column(String(120))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -150,6 +155,7 @@ class Run(Base):
     __table_args__ = (
         UniqueConstraint("blog_id", "editorial_date", "quota_ordinal", name="uq_run_daily_quota"),
         CheckConstraint("execution_mode in ('dryrun', 'sandbox', 'live')", name="ck_run_mode"),
+        CheckConstraint("capacity_state in ('ok', 'at_risk', 'infeasible')", name="ck_run_capacity_state"),
         Index("ix_runs_claim", "status", "next_run_at", "lease_until"),
     )
 

@@ -24,6 +24,15 @@ from takumi_research_agent.config import Settings
 from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
 from takumi_research_agent.persistence.database import create_database
 from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, GlobalSettings, ProviderProfile, Run, RunEvent
+from takumi_research_agent.orchestration.capacity import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_RUN_MINUTES,
+    MAX_CONCURRENCY,
+    MAX_RUN_MINUTES,
+    MIN_RUN_MINUTES,
+    apply_admission_control,
+    capacity_report,
+)
 from takumi_research_agent.orchestration.scheduler import _snapshot
 from takumi_research_agent.providers.anthropic_native import AnthropicProvider
 from takumi_research_agent.providers.base import ModelMessage, ProviderConfig
@@ -38,6 +47,16 @@ SESSION_TTL_HOURS = 12
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _capacity_limits() -> tuple[int, int]:
+    """Worker lane limits; the API and worker must read the same environment keys."""
+    for value in (os.getenv("WORKER_CONCURRENCY"), os.getenv("CAPACITY_RUN_MINUTES")):
+        if value is not None and not value.strip().isdigit():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Capacity environment values must be integers")
+    concurrency = min(max(int(os.getenv("WORKER_CONCURRENCY", str(DEFAULT_CONCURRENCY))), 1), MAX_CONCURRENCY)
+    run_minutes = min(max(int(os.getenv("CAPACITY_RUN_MINUTES", str(DEFAULT_RUN_MINUTES))), MIN_RUN_MINUTES), MAX_RUN_MINUTES)
+    return concurrency, run_minutes
 
 
 def _normalize_expiry(value: datetime) -> datetime:
@@ -694,10 +713,27 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                 "pair_completeness": item.pair_completeness,
                 "deadline_result": item.deadline_result,
                 "execution_mode": item.execution_mode,
+                "capacity_state": item.capacity_state,
+                "start_by_at": None if item.start_by_at is None else item.start_by_at.isoformat(),
+                "schedule_version": item.schedule_version,
                 "created_at": item.created_at.isoformat(),
             }
             for item in db.scalars(select(Run).order_by(Run.created_at.desc()).limit(limit))
         ]
+
+    @app.get("/api/v1/capacity")
+    def get_capacity(
+        concurrency: int | None = None,
+        run_minutes: int | None = None,
+        _: tuple[AdminUser, AdminSession] = Depends(get_auth),
+        db: Session = Depends(get_db),
+    ):
+        default_concurrency, default_run_minutes = _capacity_limits()
+        return capacity_report(
+            db,
+            concurrency=default_concurrency if concurrency is None else concurrency,
+            run_minutes=default_run_minutes if run_minutes is None else run_minutes,
+        )
 
     @app.post("/api/v1/blogs/{blog_id}/runs", status_code=status.HTTP_202_ACCEPTED)
     def create_manual_run(
@@ -727,23 +763,30 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             select(func.max(Run.quota_ordinal)).where(Run.blog_id == blog.id, Run.editorial_date == editorial_date)
         ) or 0
         now = datetime.now(timezone.utc)
+        concurrency, run_minutes = _capacity_limits()
+        target_at = now + timedelta(hours=1)
         run = Run(
             blog_id=blog.id,
             editorial_date=editorial_date,
             quota_ordinal=latest_ordinal + 1,
             quota_slot_key=_hash(f"{blog.id}:manual:{secrets.token_urlsafe(24)}"),
-            target_at=now + timedelta(hours=1),
+            target_at=target_at,
             status="queued",
             stage="queued",
             execution_mode=execution_mode,
             config_snapshot=_snapshot(blog, provider),
             pipeline_outcome="queued",
             deadline_result="pending",
+            schedule_version=blog.revision,
+            start_by_at=target_at - timedelta(minutes=run_minutes),
             next_run_at=now,
         )
         db.add(run)
+        db.flush()
+        # A manual run still competes for the same lanes: plan it with the queue, not ahead of it.
+        apply_admission_control(db, now=now, concurrency=concurrency, run_minutes=run_minutes)
         db.commit()
-        return {"run_id": run.id, "status": run.status, "execution_mode": run.execution_mode}
+        return {"run_id": run.id, "status": run.status, "execution_mode": run.execution_mode, "capacity_state": run.capacity_state}
 
     @app.post("/api/v1/runs/{run_id}/delivery")
     async def dispatch_delivery(
@@ -899,6 +942,9 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             "editorial_decision": run.editorial_decision,
             "pair_completeness": run.pair_completeness,
             "deadline_result": run.deadline_result,
+            "capacity_state": run.capacity_state,
+            "start_by_at": None if run.start_by_at is None else run.start_by_at.isoformat(),
+            "schedule_version": run.schedule_version,
             "deliveries": deliveries,
             "pair": None if pair is None else {
                 "id": pair.id,

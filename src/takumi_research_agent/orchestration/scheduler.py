@@ -10,6 +10,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from takumi_research_agent.persistence.models import BlogProfile, GlobalSettings, ProviderProfile, Run
+from takumi_research_agent.orchestration.capacity import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_RUN_MINUTES,
+    apply_admission_control,
+)
 
 
 def quota_slot_key(blog_id: str, editorial_date: date, ordinal: int = 1) -> str:
@@ -39,7 +44,13 @@ def _snapshot(blog: BlogProfile, provider: ProviderProfile | None) -> dict:
     }
 
 
-def enqueue_due_slots(session: Session, *, now: datetime | None = None) -> list[Run]:
+def enqueue_due_slots(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    run_minutes: int = DEFAULT_RUN_MINUTES,
+) -> list[Run]:
     """Create one stable daily run per active profile; missed slots are recorded, never caught up."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     created: list[Run] = []
@@ -89,6 +100,9 @@ def enqueue_due_slots(session: Session, *, now: datetime | None = None) -> list[
             config_snapshot=_snapshot(blog, provider),
             pipeline_outcome="missed_deadline" if missed else "queued",
             deadline_result="missed" if missed else "pending",
+            schedule_version=blog.revision,
+            capacity_state="infeasible" if missed else "ok",
+            start_by_at=target_at - timedelta(minutes=run_minutes),
             next_run_at=now,
         )
         try:
@@ -99,6 +113,9 @@ def enqueue_due_slots(session: Session, *, now: datetime | None = None) -> list[
         except IntegrityError:
             # A concurrent scheduler won the unique quota slot; do not retry as another slot.
             continue
+    if created:
+        # Enqueueing is not a licence to start: pack the whole queue before any worker claims.
+        apply_admission_control(session, now=now, concurrency=concurrency, run_minutes=run_minutes)
     return created
 
 

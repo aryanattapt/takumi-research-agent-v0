@@ -46,5 +46,30 @@ export type Run = {
   pair_completeness: string;
   deadline_result: string;
   execution_mode?: string;
+  capacity_state?: "ok" | "at_risk" | "infeasible";
+  start_by_at?: string | null;
+  schedule_version?: number;
   created_at: string;
+};
+
+export type CapacitySlot = {
+  run_id: string;
+  blog_id: string;
+  target_at: string;
+  start_by_at: string;
+  estimated_start_at: string;
+  estimated_finish_at: string;
+  state: "ok" | "at_risk" | "infeasible";
+  reason: string;
+};
+
+export type CapacityReport = {
+  now: string;
+  concurrency: number;
+  run_minutes: number;
+  pending: number;
+  counts: { ok: number; at_risk: number; infeasible: number };
+  at_risk_run_ids: string[];
+  infeasible_run_ids: string[];
+  slots: CapacitySlot[];
 };

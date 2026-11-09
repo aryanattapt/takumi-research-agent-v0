@@ -63,6 +63,58 @@ def test_mutation_routes_require_csrf():
     engine.dispose()
 
 
+def test_capacity_endpoint_reports_queue_and_run_fields(monkeypatch):
+    monkeypatch.setenv("WORKER_CONCURRENCY", "2")
+    monkeypatch.setenv("CAPACITY_RUN_MINUTES", "45")
+    engine, sessions = create_database("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    settings = replace(Settings.from_env(env_file=None), master_key="test-master-key-" * 4, session_cookie_secure=False)
+    app = create_app(settings, engine=engine, sessions=sessions)
+    with sessions.begin() as db:
+        db.add(GlobalSettings(id=1, recovery_mode=False, content_mutations_paused=True))
+        provider = ProviderProfile(
+            name="Test model",
+            provider_type="openai_compatible",
+            base_url="https://model.example/v1",
+            model="test-model",
+            encrypted_api_key="",
+            capability_result={"status": "reachable"},
+        )
+        db.add(provider)
+        db.flush()
+        db.add(BlogProfile(
+            name="Capacity blog",
+            base_url="https://blog.example/api",
+            provider_id=provider.id,
+            capability_result={"list_posts": True, "history_complete": True},
+            validated_revision=1,
+            active=True,
+        ))
+    with TestClient(app) as client:
+        client.post("/api/v1/setup/admin", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        csrf = client.post("/api/v1/auth/login", json={"username": "admin", "password": "correct-horse-battery-staple"}).json()["csrf_token"]
+        blog = client.get("/api/v1/blogs").json()[0]
+        queued = client.post(f"/api/v1/blogs/{blog['id']}/runs", headers={"X-CSRF-Token": csrf})
+        assert queued.status_code == 202, queued.text
+        assert queued.json()["capacity_state"] == "ok"
+        capacity = client.get("/api/v1/capacity")
+        assert capacity.status_code == 200
+        plan = capacity.json()
+        assert plan["concurrency"] == 2
+        assert plan["run_minutes"] == 45
+        assert plan["pending"] == 1
+        assert plan["counts"] == {"ok": 1, "at_risk": 0, "infeasible": 0}
+        assert plan["slots"][0]["state"] == "ok"
+        runs = client.get("/api/v1/runs").json()
+        assert runs[0]["capacity_state"] == "ok"
+        assert runs[0]["start_by_at"] is not None
+        assert runs[0]["schedule_version"] == 1
+        detail = client.get(f"/api/v1/runs/{queued.json()['run_id']}").json()
+        assert detail["capacity_state"] == "ok"
+        assert detail["start_by_at"] == runs[0]["start_by_at"]
+    engine.dispose()
+
+
 def test_manual_run_is_queued_as_dryrun_and_details_are_readable():
     engine, sessions = create_database("sqlite:///:memory:")
     Base.metadata.create_all(engine)
