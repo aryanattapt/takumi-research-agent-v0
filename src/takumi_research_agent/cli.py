@@ -15,6 +15,8 @@ from alembic.config import Config
 
 from takumi_research_agent.config import Settings
 from takumi_research_agent.operations.backup import BackupBlocked, create_backup, restore_backup, verify_backup
+from takumi_research_agent.operations.legacy_import import LegacyImportBlocked, import_legacy_sqlite
+from takumi_research_agent.research.artifacts import ArtifactStore
 from takumi_research_agent.orchestration.capacity import DEFAULT_RUN_MINUTES, MAX_CONCURRENCY, MAX_RUN_MINUTES, MIN_RUN_MINUTES, apply_admission_control
 from takumi_research_agent.orchestration.pipeline import DailyResearchProcessor
 from takumi_research_agent.orchestration.scheduler import RunWorker, enqueue_due_slots
@@ -122,17 +124,51 @@ def _restore_command(settings: Settings, target: str, acknowledge: bool) -> int:
     return 0
 
 
+def _import_sqlite_command(settings: Settings, target: str, blog_id: str | None, dry_run: bool) -> int:
+    if not blog_id:
+        print(json.dumps({"blocked": "blog_id_required", "detail": "legacy rows must be mapped to one blog profile"}, indent=2))
+        return 1
+    engine, sessions = create_database(settings.database_url)
+    artifacts_root = settings.data_dir / "artifacts"
+    try:
+        backup_id = None
+        if not dry_run:
+            # Plan §12.6: back up the current database and keep the legacy file untouched.
+            backup_id = create_backup(sessions, artifacts_root=artifacts_root, output_dir=settings.data_dir / "backups")["backup_id"]
+        with sessions.begin() as session:
+            report = import_legacy_sqlite(
+                session,
+                database_path=Path(target),
+                blog_id=blog_id,
+                artifacts=ArtifactStore(artifacts_root),
+                dry_run=dry_run,
+            )
+        print(json.dumps({**report, "backup_id": backup_id}, indent=2))
+    except (BackupBlocked, LegacyImportBlocked) as exc:
+        print(json.dumps({"blocked": exc.code, "detail": exc.detail}, indent=2))
+        return 1
+    finally:
+        engine.dispose()
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="takumi", description="Takumi bilingual research agent")
-    parser.add_argument("command", choices=("api", "worker", "migrate", "backup", "verify-backup", "restore"), help="service to start or operational action")
-    parser.add_argument("target", nargs="?", help="backup directory or manifest.json for verify-backup/restore")
+    parser.add_argument(
+        "command",
+        choices=("api", "worker", "migrate", "backup", "verify-backup", "restore", "import-sqlite"),
+        help="service to start or operational action",
+    )
+    parser.add_argument("target", nargs="?", help="backup directory, manifest.json, or legacy takumi.sqlite3 path")
     parser.add_argument("--acknowledge", action="store_true", help="required by restore: replace local data with the backup")
+    parser.add_argument("--blog-id", dest="blog_id", help="blog profile that owns every imported legacy record")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="import-sqlite: report what would be imported and change nothing")
     args = parser.parse_args()
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings.from_env()
 
-    if args.command in {"verify-backup", "restore"} and not args.target:
-        parser.error(f"{args.command} requires a backup directory or manifest.json path")
+    if args.command in {"verify-backup", "restore", "import-sqlite"} and not args.target:
+        parser.error(f"{args.command} requires a path argument")
 
     if args.command == "migrate":
         command.upgrade(_alembic_config(), "head")
@@ -142,6 +178,8 @@ def main() -> None:
         raise SystemExit(_verify_command(args.target))
     elif args.command == "restore":
         raise SystemExit(_restore_command(settings, args.target, args.acknowledge))
+    elif args.command == "import-sqlite":
+        raise SystemExit(_import_sqlite_command(settings, args.target, args.blog_id, args.dry_run))
     elif args.command == "api":
         import uvicorn
 

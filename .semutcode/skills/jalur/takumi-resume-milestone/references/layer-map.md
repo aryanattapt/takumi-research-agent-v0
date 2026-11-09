@@ -13,6 +13,7 @@ Rujukan cepat saat menambah satu fitur: di mana kode diletakkan, konvensi yang s
 | Dashboard | `web/src/App.tsx`, `web/src/types.ts`, `web/src/api.ts` | Satu file komponen besar + tipe + helper `api<T>()` |
 | Delivery bergate | `src/takumi_research_agent/delivery/service.py` | Outbox `prepare`/`dispatch`/rekonsiliasi |
 | Operasi | `src/takumi_research_agent/operations/backup.py` | `create_backup`, `verify_backup`, `restore_backup`, `artifact_integrity_report`, `last_restore_report` |
+| Import legacy | `src/takumi_research_agent/operations/legacy_import.py` | `import_legacy_sqlite` (papers→sources, blog_posts→blog_history, publications→content_ledger, sisanya audit + artifact) |
 | Migrasi | `migrations/versions/` | Alembic; head terakhir menentukan `down_revision` |
 | Status proyek | `docs/planning/plan.md` §15.4 dan §16.2, `README.md` | Tabel milestone, urutan `IP-*`, tabel status fitur |
 
@@ -62,3 +63,12 @@ Rujukan cepat saat menambah satu fitur: di mana kode diletakkan, konvensi yang s
 - Restore selalu menyalakan `GlobalSettings.recovery_mode` + `content_mutations_paused`, membatalkan lease run yang aktif (status `blocked`, stage `restore_recovery`, `lease_epoch += 1`), mengubah intent `dispatching` menjadi `unknown`, dan menulis `AuditEvent(action="system_restore")`.
 - CLI: `takumi backup`, `takumi verify-backup <path>`, `takumi restore <path> --acknowledge`; endpoint `GET /api/v1/recovery?verify_artifacts=true`.
 - Snapshot tabel memakai `Base.metadata.sorted_tables` untuk urutan insert dan kebalikannya untuk delete; `alembic_version` bukan model sehingga revision dibaca manual via `select version_num from alembic_version`.
+
+## Modul import SQLite legacy
+
+`operations/legacy_import.py` membaca `DATA_DIR/takumi.sqlite3` lama lewat URI read-only (`file:<path>?mode=ro`) dan menulis hanya ke satu blog profile yang nonaktif.
+
+- Marker idempotensi ada di tabel `legacy_import_records`, unik pada (`source_fingerprint`, `table_name`, `record_key`); fingerprint stabil dari nama file, bukan hash isi, supaya re-run tidak menggandakan data.
+- Dry run menulis di dalam savepoint (`session.begin_nested()`) lalu rollback, sehingga laporan tetap akurat tanpa mengubah data.
+- Isi penuh paper dan bundle draft lama disimpan sebagai artifact kind `legacy`; jobs/drafts/agent_events menjadi `AuditEvent`, bukan run palsu.
+- Legacy SQLite berjalan di WAL: file utama baru ter-checkpoint saat koneksi terakhir ditutup, jadi bandingkan isi logis (copy `-wal` + `-shm`), bukan byte file, saat menguji "file asli tidak berubah".

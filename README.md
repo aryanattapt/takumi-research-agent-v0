@@ -20,6 +20,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Publish bila didukung jurnal; selain itu draft | Outbox delivery dan approval fingerprint tersedia; eksekusi remote tetap menunggu kontrak blog dan capability create/publish yang terbukti |
 | Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
 | Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
+| Import data SQLite legacy | Tersedia lewat CLI `takumi import-sqlite`: satu file lama dipetakan ke satu blog profile yang nonaktif, idempoten, dan menyimpan laporan migrasi |
 | Evaluasi kualitas model | Belum selesai |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
@@ -76,6 +77,18 @@ Selama recovery mode, lease lama dibatalkan, run yang sedang berjalan menjadi `b
 
 Laporan restore terakhir tersedia di `GET /api/v1/recovery` dan panel "Backup dan recovery" pada halaman Kontrol sistem.
 
+### Import data SQLite legacy
+
+Deployment lama menyimpan satu blog di `DATA_DIR/takumi.sqlite3` (papers, blog_posts, drafts, jobs, publications, agent_events). Import dijalankan sekali per file:
+
+1. Nonaktifkan blog profile tujuan. Import menolak profil yang masih `active`, karena record publikasi lama harus direkonsiliasi sebelum jadwal boleh menulis lagi.
+2. Uji dengan `takumi import-sqlite <path> --blog-id <id> --dry-run`. Perintah ini hanya membaca file lama dan melaporkan hitungan per tabel.
+3. Jalankan tanpa `--dry-run`. CLI membuat backup database aktif dulu, lalu memetakan papers ke `sources` (isi penuh disimpan sebagai artifact `legacy/`), blog_posts ke `blog_history`, publications ke `content_ledger` sebagai `legacy_publication` dengan audit `legacy_publication_reconciliation_required`, serta jobs/drafts/agent_events menjadi audit event dan artifact.
+4. Ulangi perintah yang sama bila perlu: setiap record legacy ditandai di `legacy_import_records`, sehingga record yang sudah masuk dilaporkan sebagai `duplicates` dan tidak digandakan.
+5. Rekonsiliasi `content_ledger` legacy sebelum mengaktifkan profil. Laporan migrasi tersimpan sebagai `audit_events` bertipe `legacy_import_report`.
+
+File lama dibuka read-only dan tidak diubah. Pemetaan historis hanya masuk ke satu blog yang dipilih, tidak disalin ke semua profil.
+
 ## Jalankan lokal untuk development
 
 Persyaratan: Python 3.11+, Node.js 22+, PostgreSQL, dan Chromium Playwright jika headless browser digunakan.
@@ -101,6 +114,7 @@ Perintah layanan:
 | takumi backup | Snapshot konsisten database + salinan artifact yang dirujuk, plus manifest ber-hash. |
 | takumi verify-backup &lt;path&gt; | Verifikasi ulang hash semua file backup tanpa menyentuh database. |
 | takumi restore &lt;path&gt; --acknowledge | Ganti data lokal dengan backup terverifikasi, lalu masuk recovery mode. |
+| takumi import-sqlite &lt;path&gt; --blog-id &lt;id&gt; | Import `takumi.sqlite3` lama ke satu blog profile (tambah `--dry-run` untuk laporan tanpa menulis). |
 
 ## Guard dan batas integrasi
 
@@ -112,6 +126,7 @@ Perintah layanan:
 - Mapping API adalah JSONPath subset, bukan kode executable.
 - Backup memuat manifest ber-hash untuk database dan setiap artifact yang dirujuk; restore menolak backup yang tidak lolos verifikasi dan tidak pernah menyalin master key.
 - Setelah restore, deployment selalu berada di recovery mode: lease lama dibatalkan, intent yang masih `dispatching` menjadi `unknown` dan tidak dikirim ulang otomatis, dan profil tetap nonaktif sampai laporan recovery diselesaikan operator.
+- Import SQLite legacy membuka file lama read-only, hanya menulis ke satu blog profile yang nonaktif, dan tidak pernah mengaktifkan jadwal atau memindahkan kredensial.
 - History pagination yang berulang, tidak maju, atau tidak lengkap memblokir keputusan novelty.
 - Source quote harus cocok dengan artifact content-addressed sebelum dipakai sebagai evidence.
 - DOI, indeks jurnal, atau peer-review policy tingkat jurnal bukan bukti tunggal bahwa semua klaim paper benar.
@@ -140,7 +155,7 @@ Test menguji agent runtime, mapping/pagination blog, policy editorial, outbox de
 | src/takumi_research_agent/editorial | Penulis bilingual, critic, sanitizer, dan final body |
 | src/takumi_research_agent/orchestration | Jadwal slot, admission control kapasitas, worker lease, dan research-to-local-draft pipeline |
 | src/takumi_research_agent/delivery | Outbox intent, approval fingerprint, dan dispatcher bertingkat capability |
-| src/takumi_research_agent/operations | Backup, verifikasi manifest, restore, dan laporan recovery |
+| src/takumi_research_agent/operations | Backup, verifikasi manifest, restore, import SQLite legacy, dan laporan recovery |
 | src/takumi_research_agent/persistence | SQLAlchemy models, database, dan fenced queue |
 | migrations | Schema versi Alembic |
 | web | React/TypeScript dashboard |

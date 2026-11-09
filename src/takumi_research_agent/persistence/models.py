@@ -310,3 +310,18 @@ class AuditEvent(Base):
     resource_id: Mapped[str] = mapped_column(String(120), nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class LegacyImportRecord(Base):
+    """Idempotency marker for the legacy SQLite import; one row per imported legacy record."""
+
+    __tablename__ = "legacy_import_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    table_name: Mapped[str] = mapped_column(String(40), nullable=False)
+    record_key: Mapped[str] = mapped_column(String(400), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    __table_args__ = (UniqueConstraint("source_fingerprint", "table_name", "record_key", name="uq_legacy_import_record"),)
