@@ -6,8 +6,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from takumi_research_agent.agent.runtime import AgentResult, AgentRuntime, RequestBudget, ToolDefinition, ToolRegistry
-from takumi_research_agent.domain.models import ClaimEvidence, EvidenceSpan, SourceRecord, TopicField
+from takumi_research_agent.agent.runtime import (
+    AgentResult,
+    AgentRuntime,
+    RequestBudget,
+    ToolDefinition,
+    ToolRegistry,
+)
+from takumi_research_agent.domain.models import (
+    ClaimEvidence,
+    EvidenceSpan,
+    SourceRecord,
+    TopicField,
+)
 from takumi_research_agent.providers.base import ModelProvider
 
 from .artifacts import ArtifactStore
@@ -113,6 +124,7 @@ class ResearchToolbox:
         blog_id: str,
         blog_history: list[dict[str, Any]],
         history_complete: bool,
+        history_retriever=None,
     ):
         self.provider = provider
         self.budget = budget
@@ -123,6 +135,7 @@ class ResearchToolbox:
         self.blog_id = blog_id
         self.blog_history = blog_history
         self.history_complete = history_complete
+        self.history_retriever = history_retriever
         self.papers: dict[str, dict[str, Any]] = {}
         self.sources: dict[str, SourceRecord] = {}
         self.source_text: dict[str, str] = {}
@@ -250,9 +263,14 @@ class ResearchToolbox:
 
     async def _history(self, args: HistoryArgs) -> dict[str, Any]:
         self.history_checked = True
+        similar_items = (
+            await self.history_retriever.search(args.topic)
+            if self.history_retriever is not None
+            else history_candidates(args.topic, self.blog_history)
+        )
         return {
             "history_complete": self.history_complete,
-            "similar_items": history_candidates(args.topic, self.blog_history),
+            "similar_items": similar_items,
             "warning": None if self.history_complete else "The blog history snapshot is incomplete; novelty cannot be cleared.",
         }
 

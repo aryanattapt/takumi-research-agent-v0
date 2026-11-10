@@ -19,6 +19,7 @@ from .research_runner import (
 )
 from .retrieval import evaluate_retrieval_benchmark
 from .retrieval_runner import run_retrieval_dataset
+from .semantic_retrieval import run_semantic_retrieval_dataset
 
 
 def main() -> int:
@@ -56,6 +57,7 @@ def main() -> int:
     run_research.add_argument("--adapter-version")
     run_research.add_argument("--code-revision")
     run_research.add_argument("--max-steps", type=int, default=40)
+    run_research.add_argument("--concurrency", type=int, default=1, help="maximum concurrent trials (1-10); check provider quotas before increasing")
     run_research.add_argument("--browser", action="store_true", help="enable the local Playwright fallback")
     run_research.add_argument("--resume", action="store_true", help="continue a compatible run file and skip completed trials")
 
@@ -78,6 +80,20 @@ def main() -> int:
     run_retrieval.add_argument("--output", required=True)
     run_retrieval.add_argument("--duplicate-threshold", type=float, default=0.10)
     run_retrieval.add_argument("--code-revision")
+
+    run_semantic = subparsers.add_parser(
+        "run-semantic-retrieval",
+        help="build an in-memory embedding index and generate semantic retrieval/ranking/dedup predictions",
+    )
+    run_semantic.add_argument("--dataset", required=True)
+    run_semantic.add_argument("--output", required=True)
+    run_semantic.add_argument("--embedding-model", required=True)
+    run_semantic.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    run_semantic.add_argument("--base-url", help="optional OpenAI-compatible embeddings endpoint")
+    run_semantic.add_argument("--timeout-seconds", type=float, default=90)
+    run_semantic.add_argument("--batch-size", type=int, default=64)
+    run_semantic.add_argument("--duplicate-threshold", type=float, default=0.80)
+    run_semantic.add_argument("--code-revision")
 
     args = parser.parse_args()
 
@@ -112,6 +128,7 @@ def main() -> int:
                     code_revision=code_revision,
                     browser_enabled=args.browser,
                     max_steps=args.max_steps,
+                    concurrency=args.concurrency,
                     resume=args.resume,
                     settings=settings,
                 )
@@ -162,6 +179,37 @@ def main() -> int:
             "dataset_version": report["dataset_version"],
             "cases": len(report["cases"]),
             "retriever_version": report["metadata"]["retriever_version"],
+            "output": str(Path(args.output).expanduser().resolve()),
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.suite == "run-semantic-retrieval":
+        api_key = os.getenv(args.api_key_env, "")
+        if not api_key:
+            parser.error(f"environment variable {args.api_key_env} is required for this provider")
+        try:
+            report = asyncio.run(
+                run_semantic_retrieval_dataset(
+                    read_json(args.dataset),
+                    api_key=api_key,
+                    model=args.embedding_model,
+                    base_url=args.base_url,
+                    timeout_seconds=args.timeout_seconds,
+                    batch_size=args.batch_size,
+                    duplicate_threshold=args.duplicate_threshold,
+                    code_revision=args.code_revision,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - report provider errors through the CLI without a traceback.
+            print(json.dumps({"status": "incomplete", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}, ensure_ascii=False, indent=2))
+            return 2
+        _atomic_write_json(Path(args.output), report)
+        print(json.dumps({
+            "status": "results_generated",
+            "dataset_version": report["dataset_version"],
+            "cases": len(report["cases"]),
+            "retriever_version": report["metadata"]["retriever_version"],
+            "embedding_model": report["metadata"]["embedding_model"],
             "output": str(Path(args.output).expanduser().resolve()),
         }, ensure_ascii=False, indent=2))
         return 0

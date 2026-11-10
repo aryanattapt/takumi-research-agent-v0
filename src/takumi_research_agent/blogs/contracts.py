@@ -5,11 +5,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 class ContractError(ValueError):
@@ -55,6 +62,10 @@ class BlogMapping(BaseModel):
         for path in value.values():
             parse_path(path)
         return value
+
+    @field_serializer("response_fields_required")
+    def serialize_response_fields_required(self, value: set[str]) -> list[str]:
+        return sorted(value)
 
     @model_validator(mode="after")
     def validate_pagination(self):

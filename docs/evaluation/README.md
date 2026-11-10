@@ -4,7 +4,7 @@ The evaluation commands score versioned inputs; they do not create ground truth.
 
 ## Run the research agent
 
-The run-research command executes the existing read-only research agent against cases in a dataset. It makes live model and public-source requests and consumes provider tokens. It does not call a blog API.
+The run-research command executes the existing read-only research agent against cases in a dataset. It makes live model and public-source requests and consumes provider tokens. It does not call a blog API. Use `--concurrency 1` by default; values up to 10 let an operator measure a controlled concurrent run after checking the selected provider quota. This measures one evaluation process, not the complete multi-worker deployment.
 
 Each runnable case needs topic, field, history_complete, blog_history, and optional trend_metrics. Set history_complete explicitly: use false when the blog snapshot is incomplete and true only when an empty or populated snapshot is known to be complete. Keep benchmark corpora, source snapshots, and gold labels out of the run output directory.
 
@@ -82,6 +82,26 @@ The benchmark corpus is stored once at the top level of the dataset as corpus, w
       --results data/evaluations/retrieval-results-v1.json
 
 This runner measures the current lexical Jaccard retriever and records its version. It is a baseline, not the planned multilingual semantic index. Tune the duplicate threshold on development data and freeze it before scoring holdout data.
+
+### Embedding-backed retrieval benchmark
+
+To compare a semantic retrieval model on the same versioned corpus, run the optional OpenAI-compatible embeddings path:
+
+```sh
+python -m takumi_research_agent.evaluation run-semantic-retrieval \
+  --dataset evals/retrieval-dataset-v1.json \
+  --output data/evaluations/retrieval-semantic-v1.json \
+  --embedding-model YOUR_MULTILINGUAL_EMBEDDING_MODEL \
+  --api-key-env OPENAI_API_KEY \
+  --batch-size 64 \
+  --duplicate-threshold 0.80
+
+python -m takumi_research_agent.evaluation retrieval \
+  --dataset evals/retrieval-dataset-v1.json \
+  --results data/evaluations/retrieval-semantic-v1.json
+```
+
+Choose an embeddings endpoint/model that supports Indonesian-English cross-language matching. The runner embeds the dataset corpus and queries in batches, ranks by cosine similarity, and evaluates dedup pairs with the same scorer as the lexical baseline. Its in-memory index is rebuilt for every invocation. The production pipeline has a separate opt-in cache keyed by blog, endpoint/model, and content hash. Tune the threshold on development labels, then freeze it for holdout. Corpus text, queries, and enabled blog history are sent to the configured endpoint; do not send private content without approval.
 
 ```sh
 python -m takumi_research_agent.evaluation retrieval \

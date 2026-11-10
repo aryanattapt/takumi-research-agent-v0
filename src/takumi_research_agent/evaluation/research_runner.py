@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -254,6 +255,7 @@ async def run_research_trials(
     code_revision: str,
     browser_enabled: bool = False,
     max_steps: int = 40,
+    concurrency: int = 1,
     resume: bool = False,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -267,6 +269,8 @@ async def run_research_trials(
         raise ValueError("timeout_seconds must be positive")
     if max_steps < 1:
         raise ValueError("max_steps must be positive")
+    if not 1 <= concurrency <= 10:
+        raise ValueError("concurrency must be between 1 and 10")
     selected = validate_research_run_dataset(dataset, split=split)
     dataset_version = str(dataset["dataset_version"])
     dataset_fingerprint = _document_fingerprint(dataset)
@@ -279,6 +283,7 @@ async def run_research_trials(
         "adapter_version": adapter_version,
         "code_revision": code_revision,
         "dataset_version": dataset_version,
+        "run_concurrency": str(concurrency),
     }
     if any(not value.strip() for value in metadata.values()):
         raise ValueError("all version metadata fields must be non-empty")
@@ -304,70 +309,84 @@ async def run_research_trials(
     else:
         document = _empty_run_document(dataset_version, dataset_fingerprint, metadata, split, trials_per_case)
 
-    completed = {
-        (row.get("case_id"), row.get("trial_index"))
-        for row in document["runs"]
-        if isinstance(row, dict) and (row.get("execution") or {}).get("status") != "runner_error"
-    }
+    completed = set()
+    for row in document["runs"]:
+        if not isinstance(row, dict):
+            continue
+        execution = row.get("execution")
+        if not isinstance(execution, dict) or execution.get("status") != "runner_error":
+            completed.add((row.get("case_id"), row.get("trial_index")))
     settings = settings or Settings.from_env()
     provider = _make_provider(provider_name, model, api_key, base_url, timeout_seconds)
     artifact_base = output_path.parent / f"{output_path.stem}-artifacts"
-    try:
-        for case in selected:
-            for trial_index in range(1, trials_per_case + 1):
-                if (case["case_id"], trial_index) in completed:
-                    continue
-                run_id = uuid4().hex
-                started_at = _utc_now()
-                artifact_root = artifact_base / _safe_case_id(case["case_id"]) / f"trial-{trial_index}"
-                try:
-                    execution = await _run_one_case(
-                        case,
-                        provider=provider,
-                        settings=settings,
-                        artifact_root=artifact_root,
-                        browser_enabled=browser_enabled,
-                        max_steps=max_steps,
-                    )
-                except Exception as exc:  # noqa: BLE001 - keep a failed trial in the evaluation record.
-                    execution = {
-                        "status": "runner_error",
-                        "reason": type(exc).__name__,
-                        "error": str(exc)[:500],
-                        "duration_seconds": None,
-                        "physical_requests": None,
-                        "tool_actions": None,
-                        "tokens_input": None,
-                        "tokens_output": None,
-                        "research": None,
-                        "trace": [],
-                    }
-                run_row = {
-                    "run_id": run_id,
-                    "case_id": case["case_id"],
-                    "trial_index": trial_index,
-                    "started_at": started_at,
-                    "completed_at": _utc_now(),
-                    "artifact_root": str(artifact_root),
-                    "execution": execution,
-                }
-                existing_index = next(
-                    (
-                        index
-                        for index, row in enumerate(document["runs"])
-                        if isinstance(row, dict)
-                        and row.get("case_id") == case["case_id"]
-                        and row.get("trial_index") == trial_index
-                    ),
-                    None,
+    semaphore = asyncio.Semaphore(concurrency)
+    write_lock = asyncio.Lock()
+
+    async def execute_trial(case: dict[str, Any], trial_index: int) -> None:
+        if (case["case_id"], trial_index) in completed:
+            return
+        run_id = uuid4().hex
+        started_at = _utc_now()
+        artifact_root = artifact_base / _safe_case_id(case["case_id"]) / f"trial-{trial_index}"
+        async with semaphore:
+            try:
+                execution = await _run_one_case(
+                    case,
+                    provider=provider,
+                    settings=settings,
+                    artifact_root=artifact_root,
+                    browser_enabled=browser_enabled,
+                    max_steps=max_steps,
                 )
-                if existing_index is None:
-                    document["runs"].append(run_row)
-                else:
-                    document["runs"][existing_index] = run_row
-                if execution.get("status") != "runner_error":
-                    completed.add((case["case_id"], trial_index))
-                _atomic_write_json(output_path, document)
+            except Exception as exc:  # noqa: BLE001 - keep a failed trial in the evaluation record.
+                execution = {
+                    "status": "runner_error",
+                    "reason": type(exc).__name__,
+                    "error": str(exc)[:500],
+                    "duration_seconds": None,
+                    "physical_requests": None,
+                    "tool_actions": None,
+                    "tokens_input": None,
+                    "tokens_output": None,
+                    "research": None,
+                    "trace": [],
+                }
+        run_row = {
+            "run_id": run_id,
+            "case_id": case["case_id"],
+            "trial_index": trial_index,
+            "started_at": started_at,
+            "completed_at": _utc_now(),
+            "artifact_root": str(artifact_root),
+            "execution": execution,
+        }
+        async with write_lock:
+            existing_index = next(
+                (
+                    index
+                    for index, row in enumerate(document["runs"])
+                    if isinstance(row, dict)
+                    and row.get("case_id") == case["case_id"]
+                    and row.get("trial_index") == trial_index
+                ),
+                None,
+            )
+            if existing_index is None:
+                document["runs"].append(run_row)
+            else:
+                document["runs"][existing_index] = run_row
+            document["runs"].sort(
+                key=lambda row: (
+                    str(row.get("case_id", "")) if isinstance(row, dict) else "",
+                    int(row.get("trial_index", 0)) if isinstance(row, dict) else 0,
+                )
+            )
+            _atomic_write_json(output_path, document)
+
+    try:
+        await asyncio.gather(
+            *(execute_trial(case, trial_index) for case in selected for trial_index in range(1, trials_per_case + 1))
+        )
     finally:
         await provider.close()
 

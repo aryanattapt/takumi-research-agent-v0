@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import multiprocessing
+import queue
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
@@ -12,10 +13,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from takumi_research_agent.api.app import create_app
-from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
+from takumi_research_agent.blogs.adapter import (
+    BlogApiAdapter,
+    BlogCapabilities,
+    DeliveryOutcomeUnknown,
+)
 from takumi_research_agent.blogs.contracts import BlogMapping
-from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER, DeliveryBlocked, DeliveryService
 from takumi_research_agent.config import Settings
+from takumi_research_agent.delivery.service import (
+    STALE_DISPATCH_AFTER,
+    DeliveryBlocked,
+    DeliveryService,
+)
 from takumi_research_agent.operations.backup import create_backup, restore_backup
 from takumi_research_agent.persistence.database import create_database
 from takumi_research_agent.persistence.models import (
@@ -29,7 +38,6 @@ from takumi_research_agent.persistence.models import (
     GlobalSettings,
     Run,
 )
-
 
 MAPPING = {
     "list_path": "$.data.items",
@@ -135,7 +143,7 @@ def _environment(
     return (engine, sessions) if return_engine else sessions
 
 
-def _dispatch_until_parent_kills(database_url, request_started, release_request, accepted_posts):
+def _dispatch_until_parent_kills(database_url, request_started, release_request, accepted_posts, dispatch_results):
     """Run the real dispatcher in a child process and hold it after fake remote acceptance."""
     engine, sessions = create_database(database_url)
 
@@ -149,7 +157,7 @@ def _dispatch_until_parent_kills(database_url, request_started, release_request,
                 "remote_id": "remote-accepted-1",
                 "intent_key": intent_key,
             }
-            accepted_posts.append(accepted)
+            accepted_posts.put(accepted)
             request_started.set()
             if not release_request.wait(120):
                 raise TimeoutError("parent did not release the simulated request")
@@ -157,10 +165,10 @@ def _dispatch_until_parent_kills(database_url, request_started, release_request,
 
     async def dispatch():
         with sessions() as session:
-            await DeliveryService().dispatch(session, run_id="run-1", adapter=BlockingAcceptedAdapter())
+            return await DeliveryService().dispatch(session, run_id="run-1", adapter=BlockingAcceptedAdapter())
 
     try:
-        asyncio.run(dispatch())
+        dispatch_results.put(asyncio.run(dispatch()))
     finally:
         engine.dispose()
 
@@ -456,13 +464,13 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
             DeliveryService().prepare(session, run_id="run-1")
 
         context = multiprocessing.get_context("spawn")
-        manager = context.Manager()
         request_started = context.Event()
         release_request = context.Event()
-        accepted_posts = manager.list()
+        accepted_posts = context.Queue()
+        dispatch_results = context.Queue()
         process = context.Process(
             target=_dispatch_until_parent_kills,
-            args=(database_url, request_started, release_request, accepted_posts),
+            args=(database_url, request_started, release_request, accepted_posts, dispatch_results),
         )
         try:
             process.start()
@@ -470,10 +478,17 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
                 if request_started.wait(0.5):
                     break
                 if process.exitcode is not None:
-                    pytest.fail(f"child dispatcher exited before the fake remote request (exit code {process.exitcode})")
+                    try:
+                        result = dispatch_results.get(timeout=0.2)
+                    except queue.Empty:
+                        result = "no dispatcher result"
+                    pytest.fail(
+                        f"child dispatcher exited before the fake remote request "
+                        f"(exit code {process.exitcode}; result={result})"
+                    )
             assert request_started.is_set(), "child dispatcher did not reach the fake remote request within 60 seconds"
-            assert len(accepted_posts) == 1
-            assert accepted_posts[0]["locale"] == "en"
+            accepted_post = accepted_posts.get(timeout=5)
+            assert accepted_post["locale"] == "en"
 
             # The snapshot captures dispatching + in_flight while the request is unresolved.
             manifest = create_backup(
@@ -521,7 +536,7 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
                     headers={"X-CSRF-Token": login.json()["csrf_token"]},
                     json={
                         "outcome": "succeeded",
-                        "remote_id": accepted_posts[0]["remote_id"],
+                        "remote_id": accepted_post["remote_id"],
                         "note": "Confirmed by the simulated blog after worker termination",
                     },
                 )
@@ -539,7 +554,6 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
 
             assert summary["succeeded"] == 1
             assert [call["payload"]["article"]["language"] for call in resumed_adapter.calls] == ["id"]
-            assert len(accepted_posts) == 1
             with sessions() as session:
                 final = session.query(DeliveryIntent).filter_by(unit_key="article:en").one()
                 attempt = session.query(DeliveryAttempt).filter_by(intent_id=final.id).one()
@@ -549,6 +563,7 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
             if process.is_alive():
                 process.kill()
                 process.join(timeout=10)
-            manager.shutdown()
+            accepted_posts.close()
+            dispatch_results.close()
     finally:
         engine.dispose()
