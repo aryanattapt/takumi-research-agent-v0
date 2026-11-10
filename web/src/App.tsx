@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 15176)
-Total output lines: 497
-
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import type { ArtifactIntegrity, Blog, CapacityReport, DiscoveryCoverage, Provider, RecoveryStatus, Run, RunAgentMetrics, RunDetail } from "./types";
@@ -183,8 +180,7 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
         name: blog.name, base_url: blog.base_url, api_spec_source: blog.api_spec_source,
         auth_header: blog.auth_header, auth_scheme: blog.auth_scheme, provider_id: blog.provider_id,
         adapter_mapping: blog.adapter_mapping, capabilities: blog.capabilities, topic_settings: blog.topic_settings,
-        rss_feeds: blog.rss_feeds ?? [],
-        editorial_settings: blog.editorial_settings, schedule_enabled: blog.schedule_enabled,
+        editorial_settings: blog.editorial_settings, rss_feeds: blog.rss_feeds ?? [], schedule_enabled: blog.schedule_enabled,
         schedule_timezone: blog.schedule_timezone, publish_time: blog.publish_time, lead_minutes: blog.lead_minutes,
         active, expected_revision: blog.revision,
       }) }, csrf);
@@ -208,14 +204,173 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
         name: blog.name, base_url: blog.base_url, api_spec_source: blog.api_spec_source,
         auth_header: blog.auth_header, auth_scheme: blog.auth_scheme, provider_id: blog.provider_id,
         adapter_mapping: mapping, capabilities: blog.capabilities, topic_settings: blog.topic_settings,
-        rss_feeds: blog.rss_feeds ?? [],
-        editorial_settings: blog.editorial_settings, schedule_enabled: blog.schedule_enabled,
+        editorial_settings: blog.editorial_settings, rss_feeds: blog.rss_feeds ?? [], schedule_enabled: blog.schedule_enabled,
         schedule_timezone: blog.schedule_timezone, publish_time: blog.publish_time, lead_minutes: blog.lead_minutes,
         active: false, expected_revision: blog.revision,
       }) }, csrf);
       setMappingOpen(false); setPreview(""); await onRefresh();
     } catch (e) { setError(e instanceof Error ? e.message : "Mapping JSON tidak valid"); }
-    fi…5176 tokens truncated…elum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}
+    finally { setBusy(false); }
+  }
+  async function startRun(mode: "dryrun" | "sandbox") {
+    if (mode === "sandbox" && !window.confirm("Sandbox run tetap memakai provider dan sumber berbayar. Hasilnya menjadi intent delivery yang bisa dikirim setelah Anda menekan tombol kirim. Lanjutkan?")) return;
+    setRunBusy(true); setError("");
+    try {
+      await api("/api/v1/blogs/" + blog.id + "/runs", { method: "POST", body: JSON.stringify({ execution_mode: mode }) }, csrf);
+      await onRefresh();
+    } catch (e) { setError(e instanceof Error ? e.message : "Gagal mengantrikan run"); }
+    finally { setRunBusy(false); }
+  }
+  const providerName = providers.find((p) => p.id === blog.provider_id)?.name ?? "Belum dipilih";
+  const providerReady = providers.some((p) => p.id === blog.provider_id && p.active && p.capability_result.status === "reachable");
+  return <article className="panel overflow-hidden"><div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5"><div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate font-semibold">{blog.name}</h3><span className={`status-pill ${blog.active ? "status-green" : "status-gray"}`}>{blog.active ? "Aktif" : "Nonaktif"}</span></div><p className="mt-1 truncate text-xs text-slate-500">{blog.base_url}</p></div><span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">rev {blog.revision}</span></div>
+    <div className="flex flex-wrap gap-2 px-5"><button className="secondary-button" onClick={() => setEditOpen(true)}>Edit profil</button><button className="secondary-button" disabled={!blog.active || runBusy} onClick={() => void startRun("dryrun")}>{runBusy ? "Mengantrikan…" : "Jalankan dry-run"}</button><button className="secondary-button" disabled={!blog.active || runBusy} onClick={() => void startRun("sandbox")}>Jalankan sandbox</button><p className="w-full text-xs text-slate-500">Dry-run hanya menyimpan draft lokal. Sandbox menyiapkan intent delivery; pengiriman tetap harus dikonfirmasi manual dan capability create harus terbukti.</p></div>
+    <div className="grid gap-3 p-5 sm:grid-cols-3"><MetricSmall label="Provider" value={providerName} /><MetricSmall label="Jadwal" value={blog.schedule_enabled ? `${blog.publish_time} ${blog.schedule_timezone}` : "Nonaktif"} /><MetricSmall label="History read" value={blog.capability_result.list_posts ? `${blog.capability_result.records_read ?? 0} artikel` : "Belum dites"} /></div>
+    <div className="space-y-4 border-t border-slate-100 p-5"><div className="flex flex-wrap gap-2"><button className="secondary-button" onClick={() => void loadContract()} disabled={busy}>{busy ? "Memuat…" : "Baca OpenAPI"}</button>{ops.length > 0 && <><select aria-label="List GET operation" value={selected} onChange={(e) => setSelected(e.target.value)} className="field-select min-w-48 flex-1"><option value="">Pilih GET list operation</option>{ops.filter((op) => op.method === "get").map((op) => <option key={op.operation_id} value={op.operation_id}>{op.operation_id} · {op.path}</option>)}</select><button className="secondary-button" onClick={() => void testRead()} disabled={busy || !selected}>Test read-only GET</button></>}</div>
+      {ops.length > 0 && <div className="flex flex-wrap gap-2"><select aria-label="Create POST/PUT operation" value={createSelected} onChange={(e) => setCreateSelected(e.target.value)} className="field-select min-w-48 flex-1"><option value="">Pilih POST/PUT create operation</option>{ops.filter((op) => op.method === "post" || op.method === "put").map((op) => <option key={op.operation_id} value={op.operation_id}>{op.operation_id} · {op.path}</option>)}</select><button className="secondary-button" onClick={() => void saveCreateOperation()} disabled={busy || !createSelected}>Simpan create operation</button><button className="secondary-button" onClick={() => void testCreate()} disabled={busy || !blog.capabilities.create_operation}>{busy ? "Memproses…" : "Uji sandbox create"}</button></div>}
+      <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex gap-4"><button className="text-sm font-medium text-slate-600 hover:text-ink" onClick={() => setTopicOpen(!topicOpen)}>{topicOpen ? "Sembunyikan cakupan" : "Lihat cakupan topik"}</button><button className="text-sm font-medium text-slate-600 hover:text-ink" onClick={() => { setMappingText(JSON.stringify(blog.adapter_mapping, null, 2)); setMappingOpen(!mappingOpen); }}>JSON mapping</button></div><button className={blog.active ? "danger-button" : "secondary-button"} disabled={busy || (!blog.active && (!blog.capability_result.history_complete || !providerReady))} onClick={() => void toggleActive(!blog.active)}>{blog.active ? "Nonaktifkan profil" : "Aktifkan untuk riset"}</button></div>
+      {topicOpen && <div className="flex flex-wrap gap-2">{fields.map((field) => <span className={`topic-chip ${blog.topic_settings[field] ? "topic-on" : ""}`} key={field}>{field}</span>)}</div>}
+      {mappingOpen && <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4"><p className="text-sm font-semibold">Response dan payload mapping</p><label className="field-label">JSONPath mapping<textarea aria-label="JSONPath mapping" value={mappingText} onChange={(e) => setMappingText(e.target.value)} rows={8} className="field-input font-mono text-xs" placeholder={'{"list_path":"$.data.items","response_fields":{"id":"$.id","title":"$.title","content":"$.content"},"create_fields":{"title":"$.article.title","content":"$.article.body","status":"$.article.status"}}'} /></label><label className="field-label">Sample API response<textarea aria-label="Sample API response" value={sampleText} onChange={(e) => setSampleText(e.target.value)} rows={5} className="field-input font-mono text-xs" /></label><label className="field-label">Canonical create sample<textarea aria-label="Canonical create sample" value={canonicalText} onChange={(e) => setCanonicalText(e.target.value)} rows={4} className="field-input font-mono text-xs" /></label><div className="flex gap-2"><button className="secondary-button" onClick={() => void previewMapping()} disabled={busy}>Preview only</button><button className="primary-button" onClick={() => void saveMapping()} disabled={busy}>Simpan mapping</button></div>{preview && <pre className="max-h-64 overflow-auto rounded-xl bg-ink p-3 text-xs text-teal-100">{preview}</pre>}</div>}
+      <p className="text-xs leading-5 text-slate-500">OpenAPI operation list: {blog.api_spec_source || "belum dikonfigurasi"}. Profile activation hanya membuka riset/history; write capability belum terbukti.</p>{error && <ErrorText>{error}</ErrorText>}
+    </div>
+    {editOpen && <BlogModal blog={blog} providers={providers} csrf={csrf} onClose={() => setEditOpen(false)} onSaved={() => { setEditOpen(false); void onRefresh(); }} />}
+
+  </article>;
+}
+
+function ProviderCard({ provider, csrf, onEdit, onRefresh }: { provider: Provider; csrf: string; onEdit: () => void; onRefresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  async function probe() {
+    setBusy(true); setError("");
+    try { await api(`/api/v1/providers/${provider.id}/probe`, { method: "POST" }, csrf); await onRefresh(); }
+    catch (e) { setError(e instanceof Error ? e.message : "Probe gagal; request mungkin menggunakan token."); await onRefresh(); }
+    finally { setBusy(false); }
+  }
+  return <article className="panel p-5"><div className="flex items-start justify-between gap-4"><div><h3 className="font-semibold">{provider.name}</h3><p className="mt-1 text-xs text-slate-500">{provider.provider_type === "anthropic" ? "Anthropic Messages API" : "OpenAI-compatible"}</p></div><span className={`status-pill ${provider.secret_configured ? "status-green" : "status-amber"}`}>{provider.secret_configured ? "Credential tersimpan" : "Tanpa credential"}</span></div><div className="mt-5 grid gap-3 sm:grid-cols-2"><MetricSmall label="Model" value={provider.model} /><MetricSmall label="Endpoint" value={provider.base_url} /><MetricSmall label="Timeout" value={`${provider.timeout_seconds}s`} /><MetricSmall label="Probe" value={String(provider.capability_result.status ?? "Belum dites")} /></div><div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600">Probe mengirim satu request model berbiaya. Hasilnya hanya membuktikan balasan text, bukan tool calling, JSON schema, atau kapasitas konteks.</div><div className="mt-4 flex gap-2"><button className="secondary-button" onClick={onEdit}>Edit config</button><button className="secondary-button" disabled={busy} onClick={() => void probe()}>{busy ? "Probe berjalan…" : "Probe model"}</button></div>{error && <ErrorText>{error}</ErrorText>}</article>;
+}
+
+function ProviderModal({ provider, csrf, onClose, onSaved }: { provider: Provider | null; csrf: string; onClose: () => void; onSaved: () => void }) {
+  const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setError(""); const data = new FormData(event.currentTarget);
+    try {
+      const payload = { name: data.get("name"), provider_type: data.get("provider_type"), base_url: data.get("base_url"), model: data.get("model"), api_key: data.get("api_key") || null, timeout_seconds: Number(data.get("timeout_seconds")), max_output_tokens: Number(data.get("max_output_tokens")), ...(provider ? { expected_revision: provider.revision } : {}) };
+      await api(provider ? `/api/v1/providers/${provider.id}` : "/api/v1/providers", { method: provider ? "PUT" : "POST", body: JSON.stringify(payload) }, csrf);
+      onSaved();
+    } catch (e) { setError(e instanceof Error ? e.message : "Gagal menyimpan provider"); }
+    finally { setBusy(false); }
+  }
+  return <Modal title={provider ? "Edit model provider" : "Tambah model provider"} onClose={onClose}><form onSubmit={submit} className="space-y-4"><label className="field-label">Nama<input name="name" required minLength={2} className="field-input" placeholder="Research model" defaultValue={provider?.name} /></label><label className="field-label">Provider<select name="provider_type" className="field-select" defaultValue={provider?.provider_type ?? "openai_compatible"}><option value="openai_compatible">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select></label><label className="field-label">Base URL<input name="base_url" type="url" required className="field-input" defaultValue={provider?.base_url ?? "https://api.openai.com/v1"} /></label><label className="field-label">Model ID<input name="model" required className="field-input" placeholder="Isi sesuai provider endpoint" defaultValue={provider?.model} /></label><label className="field-label">API key<input name="api_key" type="password" autoComplete="new-password" className="field-input" placeholder={provider?.secret_configured ? "Kosongkan untuk mempertahankan key saat ini" : "Tersimpan terenkripsi; tidak ditampilkan lagi"} /></label><div className="grid grid-cols-2 gap-3"><label className="field-label">Timeout (s)<input name="timeout_seconds" type="number" min="5" max="600" defaultValue={provider?.timeout_seconds ?? 90} className="field-input" /></label><label className="field-label">Output tokens<input name="max_output_tokens" type="number" min="128" max="64000" defaultValue={provider?.max_output_tokens ?? 4000} className="field-input" /></label></div>{error && <ErrorText>{error}</ErrorText>}<ModalActions onClose={onClose} busy={busy} submitLabel={provider ? "Simpan perubahan" : "Simpan provider"} /></form></Modal>;
+}
+
+function BlogModal({ blog, providers, csrf, onClose, onSaved }: { blog?: Blog; providers: Provider[]; csrf: string; onClose: () => void; onSaved: () => void }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const data = new FormData(event.currentTarget);
+    try {
+      const payload = {
+        name: data.get("name"),
+        base_url: data.get("base_url"),
+        api_spec_source: data.get("api_spec_source"),
+        auth_header: data.get("auth_header") || "Authorization",
+        auth_scheme: data.get("auth_scheme") || "Bearer",
+        api_token: data.get("api_token") || null,
+        provider_id: data.get("provider_id") || null,
+        schedule_enabled: data.get("schedule_enabled") === "on",
+        schedule_timezone: data.get("schedule_timezone"),
+        publish_time: data.get("publish_time"),
+        lead_minutes: Number(data.get("lead_minutes")),
+        topic_settings: Object.fromEntries(fields.map((field) => [field, data.get("topic_" + field) === "on"])),
+        rss_feeds: JSON.parse(String(data.get("rss_feeds") || "[]")),
+        ...(blog ? { adapter_mapping: blog.adapter_mapping, capabilities: blog.capabilities, editorial_settings: blog.editorial_settings, active: false, expected_revision: blog.revision } : {}),
+      };
+      await api(blog ? "/api/v1/blogs/" + blog.id : "/api/v1/blogs", {
+        method: blog ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      }, csrf);
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal menyimpan blog");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <Modal title={blog ? "Edit blog profile" : "Tambah blog profile"} onClose={onClose}>
+    <form onSubmit={submit} className="space-y-4">
+      <label className="field-label">Nama profile<input name="name" required className="field-input" placeholder="Blog teknologi" defaultValue={blog?.name} /></label>
+      <label className="field-label">Base URL<input name="base_url" type="url" required className="field-input" placeholder="https://blog.example.com/api" defaultValue={blog?.base_url} /></label>
+      <label className="field-label">OpenAPI JSON/YAML source<input name="api_spec_source" className="field-input" placeholder="URL HTTPS allowlisted atau file di server" defaultValue={blog?.api_spec_source} /></label>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="field-label">Auth header<input name="auth_header" className="field-input" defaultValue={blog?.auth_header ?? "Authorization"} /></label>
+        <label className="field-label">Auth scheme<input name="auth_scheme" className="field-input" defaultValue={blog?.auth_scheme ?? "Bearer"} /></label>
+      </div>
+      <label className="field-label">API token<input name="api_token" type="password" autoComplete="new-password" className="field-input" placeholder={blog?.secret_configured ? "Kosongkan untuk mempertahankan token" : "Credential blog"} /></label>
+      <label className="field-label">Model provider<select name="provider_id" className="field-select" defaultValue={blog?.provider_id ?? ""}><option value="">Pilih nanti</option>{providers.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.model}</option>)}</select></label>
+      <div className="grid grid-cols-3 gap-3">
+        <label className="field-label">Timezone<input name="schedule_timezone" defaultValue={blog?.schedule_timezone ?? "Asia/Jakarta"} className="field-input" /></label>
+        <label className="field-label">Target time<input name="publish_time" type="time" defaultValue={blog?.publish_time ?? "06:00"} className="field-input" /></label>
+        <label className="field-label">Lead (min)<input name="lead_minutes" type="number" defaultValue={blog?.lead_minutes ?? 120} min="0" max="1440" className="field-input" /></label>
+      </div>
+      <label className="flex items-center gap-2 text-sm text-slate-700"><input name="schedule_enabled" type="checkbox" defaultChecked={blog?.schedule_enabled ?? false} className="accent-teal-600" />Jadwalkan otomatis setiap hari</label>
+      <div>
+        <p className="field-label">Cakupan topik</p>
+        <div className="mt-2 flex flex-wrap gap-4">{fields.map((field) => <label key={field} className="flex items-center gap-2 text-sm capitalize text-slate-700"><input name={"topic_" + field} type="checkbox" defaultChecked={blog?.topic_settings[field] ?? true} className="accent-teal-600" />{field}</label>)}</div>
+      </div>
+      <label className="field-label">RSS feeds per profil<textarea name="rss_feeds" rows={5} className="field-input font-mono text-xs" defaultValue={JSON.stringify(blog?.rss_feeds ?? [], null, 2)} placeholder={'[{"name":"lab","url":"https://example.org/feed.xml","field":"biology"}]'} /></label>
+      <p className="-mt-3 text-xs leading-5 text-slate-500">Gunakan array JSON kosong untuk memakai TREND_RSS_FEEDS global. URL harus HTTPS dan host feed harus ada di RESEARCH_ALLOWED_DOMAINS.</p>
+      <div className="rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600">Profil dimulai nonaktif. Perubahan endpoint, contract, token, atau mapping meminta validasi GET ulang. Publish otomatis baru dibuka setelah write capability diuji.</div>
+      {error && <ErrorText>{error}</ErrorText>}
+      <ModalActions onClose={onClose} busy={busy} submitLabel={blog ? "Simpan perubahan" : "Simpan profil"} />
+    </form>
+  </Modal>;
+}
+function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: string }) {
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [capacity, setCapacity] = useState<CapacityReport | null>(null);
+  useEffect(() => { api<CapacityReport>("/api/v1/capacity").then(setCapacity).catch(() => setCapacity(null)); }, [runs.length]);
+  const [locale, setLocale] = useState<"id" | "en">("id");
+  const [error, setError] = useState("");
+  const [dispatching, setDispatching] = useState(false);
+  async function openRun(id: string) {
+    setError("");
+    try { setDetail(await api<RunDetail>("/api/v1/runs/" + id)); setLocale("id"); }
+    catch (e) { setError(e instanceof Error ? e.message : "Gagal memuat detail run"); }
+  }
+  async function dispatchDelivery() {
+    if (!detail || !window.confirm("Kirim payload tersimpan ke blog? Ini dapat membuat konten remote.")) return;
+    setDispatching(true); setError("");
+    try {
+      await api("/api/v1/runs/" + detail.id + "/delivery", { method: "POST", body: JSON.stringify({ execution_mode: detail.execution_mode }) }, csrf);
+      await openRun(detail.id);
+    } catch (e) { setError(e instanceof Error ? e.message : "Delivery gagal; periksa status outbox."); }
+    finally { setDispatching(false); }
+  }
+  const article = detail?.pair?.articles.find((item) => item.locale === locale);
+  async function reconcileDelivery(intentId: string, outcome: "succeeded" | "failed") {
+    if (!detail) return;
+    let remoteId: string | null = null;
+    if (outcome === "succeeded") {
+      const value = window.prompt("Remote ID artikel (opsional)");
+      if (value === null) return;
+      remoteId = value.trim() || null;
+    } else if (!window.confirm("Pastikan kamu sudah memeriksa blog dan memastikan artikel ini tidak terbentuk. Menandai gagal akan membuka intent untuk dicoba lagi.")) return;
+    setDispatching(true); setError("");
+    try {
+      await api(`/api/v1/runs/${detail.id}/delivery/${intentId}/reconcile`, { method: "POST", body: JSON.stringify({ outcome, remote_id: remoteId }) }, csrf);
+      await openRun(detail.id);
+    } catch (e) { setError(e instanceof Error ? e.message : "Rekonsiliasi gagal"); }
+    finally { setDispatching(false); }
+  }
+  const pendingDelivery = detail?.deliveries.some((item) => item.state === "prepared" || item.state === "failed");
+  return <section className="space-y-5">
+    <div><h2 className="section-title">Run history</h2><p className="section-subtitle">Outcome pipeline, keputusan editorial, bukti sumber, trace agent, dan deadline.</p></div>
+    {capacity && <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span className="status-pill status-gray">Kapasitas {capacity.concurrency} lane</span><span className="status-pill status-gray">{capacity.run_minutes} menit/run</span><span className="status-pill status-blue">{capacity.pending} antre</span>{capacity.counts.at_risk > 0 && <span className="status-pill status-amber">{capacity.counts.at_risk} at risk</span>}{capacity.counts.infeasible > 0 && <span className="status-pill bg-rose-50 text-rose-700">{capacity.counts.infeasible} infeasible</span>}<span>Slot at risk berarti antrean tidak lagi muat sebelum target; mulai lebih awal atau kurangi beban.</span></div>}
+    {error && <ErrorText>{error}</ErrorText>}
+    {runs.length ? <div className="panel overflow-hidden"><RunTable runs={runs} blogs={blogs} onOpen={openRun} /></div> : <EmptyState title="Belum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}
     {detail && <Modal title={detail.pair?.topic ?? "Detail run"} onClose={() => setDetail(null)}>
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4">
