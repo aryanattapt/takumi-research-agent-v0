@@ -270,12 +270,11 @@ def test_reconciliation_waits_for_stale_dispatch_and_finalizes_attempt():
             json={"outcome": "failed", "note": "Conflicting second reconciliation"},
         )
         assert duplicate.status_code == 409
-
-    with sessions() as db:
-        intent = db.get(DeliveryIntent, "intent-1")
-        attempt = db.get(DeliveryAttempt, "attempt-1")
-        assert intent.state == "succeeded" and intent.remote_id == "remote-1"
-        assert attempt.outcome == "succeeded" and attempt.finished_at is not None
-        assert attempt.response_summary["reconciled"] is True
-        assert attempt.response_summary["note"] == "Confirmed in blog history"
+        with sessions() as db:
+            intent = db.get(DeliveryIntent, "intent-1")
+            attempt = db.get(DeliveryAttempt, "attempt-1")
+            assert intent.state == "succeeded" and intent.remote_id == "remote-1"
+            assert attempt.outcome == "succeeded" and attempt.finished_at is not None
+            assert attempt.response_summary["reconciled"] is True
+            assert attempt.response_summary["note"] == "Confirmed in blog history"
     engine.dispose()
