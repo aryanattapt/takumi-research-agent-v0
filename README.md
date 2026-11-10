@@ -141,7 +141,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Test menguji agent runtime, mapping/pagination blog, policy editorial, crash setelah blog menerima post, outbox delivery/reconciliation, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, crash setelah blog menerima post, outbox delivery/reconciliation, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 

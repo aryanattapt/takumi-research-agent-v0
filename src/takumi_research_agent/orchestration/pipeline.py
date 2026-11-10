@@ -133,6 +133,15 @@ class DailyResearchProcessor:
             unique.setdefault((item.source, item.source_item_id, item.observed_at), item)
         with self.sessions.begin() as session:
             for item in unique.values():
+                existing = session.scalar(
+                    select(TrendObservation).where(
+                        TrendObservation.source == item.source,
+                        TrendObservation.source_item_id == item.source_item_id,
+                        TrendObservation.observed_at == item.observed_at,
+                    )
+                )
+                if existing is not None:
+                    continue
                 session.add(
                     TrendObservation(
                         source=item.source,
@@ -147,6 +156,64 @@ class DailyResearchProcessor:
                         score_details=item.score_details,
                     )
                 )
+
+    def _resume_saved_pair(self, run: Run) -> dict[str, Any] | None:
+        """Complete a reclaimed run from its atomic saved pair without repeating model/source work."""
+        with self.sessions() as session:
+            pair = session.scalar(
+                select(ArticlePairRecord)
+                .where(ArticlePairRecord.run_id == run.id)
+                .order_by(ArticlePairRecord.created_at)
+                .limit(1)
+            )
+            if pair is None:
+                return None
+            pair_id = pair.id
+            decision = pair.decision
+
+        delivery_note: dict[str, Any] = {"intents": 0}
+        if decision in {"draft", "publish"}:
+            try:
+                with self.sessions.begin() as session:
+                    created_intents = DeliveryService().prepare(session, run_id=run.id)
+                    delivery_note["intents"] = len(created_intents)
+                    if created_intents:
+                        session.add(
+                            RunEvent(
+                                run_id=run.id,
+                                event_type="delivery_prepared",
+                                details={
+                                    "intents": len(created_intents),
+                                    "execution_mode": run.execution_mode,
+                                    "recovered": True,
+                                },
+                            )
+                        )
+            except DeliveryBlocked as exc:
+                delivery_note["blocked"] = exc.code
+                with self.sessions.begin() as session:
+                    session.add(
+                        RunEvent(
+                            run_id=run.id,
+                            event_type="delivery_plan_skipped",
+                            details={"code": exc.code, "detail": exc.detail[:300], "recovered": True},
+                        )
+                    )
+
+        accepted = decision in {"draft", "publish"}
+        target_at = run.target_at
+        if target_at.tzinfo is None:
+            target_at = target_at.replace(tzinfo=timezone.utc)
+        return {
+            "status": "completed",
+            "reason": "draft_saved_locally" if accepted else "editorial_policy_blocked",
+            "editorial_decision": decision,
+            "pair_completeness": "complete" if accepted else "none",
+            "deadline_result": "met" if datetime.now(timezone.utc) <= target_at.astimezone(timezone.utc) else "late",
+            "pair_id": pair_id,
+            "delivery": delivery_note,
+            "note": "resumed_saved_article_without_repeating_research_or_remote_write",
+        }
 
     def _sync_history(self, blog_id: str, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         snapshot_id = _hash(f"{blog_id}:{datetime.now(timezone.utc).isoformat()}")[:36]
@@ -302,6 +369,9 @@ class DailyResearchProcessor:
             session.add(RunEvent(run_id=run_id, event_type="article_pair_saved", details={"pair_id": pair.pair_id, "decision": decision.decision, "local_only": True}))
 
     async def process(self, run: Run) -> dict[str, Any]:
+        resumed = self._resume_saved_pair(run)
+        if resumed is not None:
+            return resumed
         runtime = self._load_snapshot(run)
         provider = runtime["provider"]
         adapter = runtime["adapter"]
@@ -391,7 +461,13 @@ class DailyResearchProcessor:
                 final_bodies=final_bodies,
                 artifacts=artifacts,
                 trend=selected,
-                agent_metrics={"physical_requests": budget.physical_requests, "tool_actions": budget.tool_actions},
+                agent_metrics={
+                    "physical_requests": budget.physical_requests,
+                    "research_physical_requests": agent_result.physical_requests,
+                    "editorial_physical_requests": budget.physical_requests - agent_result.physical_requests,
+                    "tool_actions": budget.tool_actions,
+                    "trace": list(agent_result.trace),
+                },
             )
             delivery_note: dict[str, Any] = {"intents": 0}
             try:
