@@ -302,6 +302,7 @@ class DailyResearchProcessor:
                             }
                             for source in pair.sources
                         ],
+                        "claims": [claim.model_dump(mode="json") for claim in pair.claims],
                     },
                 )
             )
@@ -350,7 +351,11 @@ class DailyResearchProcessor:
                         body_markdown=article.body_markdown,
                         final_body=final_body,
                         body_hash=body_hash,
-                        metadata_json={"summary": article.summary, "format": "markdown"},
+                        metadata_json={
+                            "summary": article.summary,
+                            "format": "markdown",
+                            "cited_evidence_ids": article.cited_evidence_ids,
+                        },
                     )
                 )
                 session.add(

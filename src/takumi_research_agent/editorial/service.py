@@ -169,7 +169,12 @@ class EditorialService:
             citations = "\n\n## Sources / Sumber\n\n" + "\n".join(citation_lines)
             final_body = render_final_body(article.body_markdown + citations, output_format=output_format)
             final_bodies[locale] = final_body
-            articles[locale] = LocalizedArticle(title=article.title, summary=article.summary, body_markdown=article.body_markdown + citations)
+            articles[locale] = LocalizedArticle(
+                title=article.title,
+                summary=article.summary,
+                body_markdown=article.body_markdown + citations,
+                cited_evidence_ids=article.cited_evidence_ids,
+            )
 
         critic_payload = {
             "topic": topic,

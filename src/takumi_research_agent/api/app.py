@@ -23,7 +23,7 @@ from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, Op
 from takumi_research_agent.config import Settings
 from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService, delivery_reconciliation_ready, pending_delivery_attempt
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, RunEvent
+from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, RunEvent, SourceRecord as SourceRecordRow
 from takumi_research_agent.orchestration.capacity import (
     DEFAULT_CONCURRENCY,
     DEFAULT_RUN_MINUTES,
@@ -950,6 +950,46 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
         if run is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
         pair = db.scalar(select(ArticlePairRecord).where(ArticlePairRecord.run_id == run_id))
+        review_data = pair.review_result or {} if pair is not None else {}
+        source_refs = review_data.get("sources") or []
+        evidence_refs = review_data.get("evidence") or []
+        source_ids = [item.get("source_id") for item in source_refs if item.get("source_id")]
+        evidence_ids = [item.get("evidence_id") for item in evidence_refs if item.get("evidence_id")]
+        source_rows = {
+            item.id: item
+            for item in db.scalars(select(SourceRecordRow).where(SourceRecordRow.id.in_(source_ids))).all()
+        } if source_ids else {}
+        evidence_rows = {
+            item.id: item
+            for item in db.scalars(select(EvidenceSpanRecord).where(EvidenceSpanRecord.id.in_(evidence_ids))).all()
+        } if evidence_ids else {}
+        sources = []
+        for reference in source_refs:
+            source = source_rows.get(reference.get("source_id"))
+            metadata = source.metadata_json if source is not None else {}
+            sources.append({
+                "source_id": reference.get("source_id"),
+                "title": source.title if source is not None else "",
+                "url": source.url if source is not None else "",
+                "source_type": source.source_type if source is not None else "unknown",
+                "content_hash": reference.get("content_hash"),
+                "read_status": reference.get("read_status", metadata.get("read_status", "unknown")),
+                "peer_reviewed": metadata.get("peer_reviewed"),
+                "peer_review_basis": metadata.get("peer_review_basis", "unknown"),
+                "retracted": reference.get("retracted", metadata.get("retracted", False)),
+                "available": source is not None,
+            })
+        evidence = []
+        for reference in evidence_refs:
+            item = evidence_rows.get(reference.get("evidence_id"))
+            evidence.append({
+                "evidence_id": reference.get("evidence_id"),
+                "source_id": reference.get("source_id"),
+                "content_hash": reference.get("content_hash"),
+                "quote": item.quote if item is not None else None,
+                "locator": item.locator if item is not None else None,
+                "available": item is not None,
+            })
         versions = []
         if pair is not None:
             for version in db.scalars(select(ArticleVersion).where(ArticleVersion.pair_id == pair.id).order_by(ArticleVersion.locale)):
@@ -959,6 +999,7 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                     "summary": version.metadata_json.get("summary", ""),
                     "body": version.final_body,
                     "body_hash": version.body_hash,
+                    "cited_evidence_ids": version.metadata_json.get("cited_evidence_ids", []),
                 })
         deliveries = []
         for intent in db.scalars(select(DeliveryIntent).where(DeliveryIntent.run_id == run_id).order_by(DeliveryIntent.unit_key)):
@@ -1002,7 +1043,15 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                 "field": pair.field,
                 "research_question": pair.research_question,
                 "decision": pair.decision,
-                "review": pair.review_result,
+                "review": {
+                    key: value
+                    for key, value in review_data.items()
+                    if key not in {"agent", "sources", "evidence", "claims"}
+                },
+                "agent": review_data.get("agent", {}),
+                "sources": sources,
+                "evidence": evidence,
+                "claims": review_data.get("claims", []),
                 "articles": versions,
             },
         }

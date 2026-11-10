@@ -17,6 +17,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Riwayat dan mapping JSON blog | GET read-only, OpenAPI operation list, JSONPath terbatas, preview dan pagination |
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
+| Run detail | Klaim terhubung ke kutipan dan sumber; trace agent dan evidence ditampilkan secara terstruktur |
 | Publish bila didukung jurnal; selain itu draft | Outbox delivery dan approval fingerprint tersedia; eksekusi remote tetap menunggu kontrak blog dan capability create/publish yang terbukti |
 | Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
 | Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
@@ -141,7 +142,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, dan API dashboard dengan SQLite/fixture. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, detail run yang menghubungkan claim/evidence/source, dan uji capability create draft dengan MockTransport serta pause/recovery guards. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model; capability test memakai blog palsu. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 

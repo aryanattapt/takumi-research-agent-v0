@@ -50,6 +50,7 @@ class LocalizedArticle(DomainModel):
     title: str = Field(min_length=8, max_length=180)
     summary: str = Field(min_length=40, max_length=500)
     body_markdown: str = Field(min_length=300, max_length=30_000)
+    cited_evidence_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class ArticlePair(DomainModel):

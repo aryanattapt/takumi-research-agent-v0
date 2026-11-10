@@ -52,6 +52,93 @@ export type Run = {
   created_at: string;
 };
 
+export type RunArticle = {
+  locale: "id" | "en";
+  title: string;
+  summary: string;
+  body: string;
+  body_hash: string;
+  cited_evidence_ids: string[];
+};
+
+export type RunSource = {
+  source_id: string;
+  title: string;
+  url: string;
+  source_type: string;
+  content_hash: string | null;
+  read_status: string;
+  peer_reviewed: boolean | null;
+  peer_review_basis: string;
+  retracted: boolean;
+  available: boolean;
+};
+
+export type RunEvidence = {
+  evidence_id: string;
+  source_id: string;
+  content_hash: string;
+  quote: string | null;
+  locator: string | null;
+  available: boolean;
+};
+
+export type RunClaim = {
+  claim: string;
+  evidence_ids: string[];
+  importance: "critical" | "material" | "context";
+  support: "supported" | "partial" | "contradicted" | "unknown";
+  qualification?: string | null;
+};
+
+export type AgentTraceEvent = {
+  type: "model_response" | "tool" | string;
+  step?: number;
+  stop_reason?: string;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  name?: string;
+  status?: string;
+  reason?: string;
+};
+
+export type RunAgentMetrics = {
+  physical_requests?: number;
+  research_physical_requests?: number;
+  editorial_physical_requests?: number;
+  tool_actions?: number;
+  trace?: AgentTraceEvent[];
+};
+
+export type RunDetail = {
+  id: string;
+  blog_id: string;
+  status: string;
+  stage: string;
+  execution_mode: string;
+  pipeline_outcome: string;
+  editorial_decision: string;
+  pair_completeness: string;
+  deadline_result: string;
+  capacity_state: string;
+  start_by_at: string | null;
+  schedule_version: number;
+  deliveries: Array<Record<string, any>>;
+  pair: {
+    id: string;
+    topic: string;
+    field: string;
+    research_question: string;
+    decision: string;
+    review: Record<string, any>;
+    agent: RunAgentMetrics;
+    sources: RunSource[];
+    evidence: RunEvidence[];
+    claims: RunClaim[];
+    articles: RunArticle[];
+  } | null;
+};
+
 export type CapacitySlot = {
   run_id: string;
   blog_id: string;

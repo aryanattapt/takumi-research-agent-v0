@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import type { ArtifactIntegrity, Blog, CapacityReport, Provider, RecoveryStatus, Run } from "./types";
+import type { ArtifactIntegrity, Blog, CapacityReport, Provider, RecoveryStatus, Run, RunAgentMetrics, RunDetail } from "./types";
 
 type Page = "overview" | "blogs" | "providers" | "runs" | "settings";
 const fields = ["technology", "physics", "chemistry", "biology"] as const;
@@ -167,7 +167,7 @@ function BlogCard({ blog, providers, csrf, onRefresh }: { blog: Blog; providers:
     finally { setBusy(false); }
   }
   async function testCreate() {
-    if (!window.confirm("Uji ini mengirim satu draft nyata ke blog. Lanjutkan hanya jika endpoint adalah sandbox.")) return;
+    if (!window.confirm(`Uji ini mengirim satu draft ke ${blog.base_url} memakai credential profil ini. Lanjutkan hanya jika endpoint dan credential tersebut khusus sandbox; draft uji tidak otomatis dihapus.`)) return;
     setBusy(true); setError("");
     try { await api(`/api/v1/blogs/${blog.id}/adapter/test-create`, { method: "POST", body: JSON.stringify({ acknowledge_remote_write: true }) }, csrf); await onRefresh(); }
     catch (e) { setError(e instanceof Error ? e.message : "Uji create gagal; periksa hasil remote sebelum mengulang."); await onRefresh(); }
@@ -326,7 +326,7 @@ function BlogModal({ blog, providers, csrf, onClose, onSaved }: { blog?: Blog; p
   </Modal>;
 }
 function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: string }) {
-  const [detail, setDetail] = useState<Record<string, any> | null>(null);
+  const [detail, setDetail] = useState<RunDetail | null>(null);
   const [capacity, setCapacity] = useState<CapacityReport | null>(null);
   useEffect(() => { api<CapacityReport>("/api/v1/capacity").then(setCapacity).catch(() => setCapacity(null)); }, [runs.length]);
   const [locale, setLocale] = useState<"id" | "en">("id");
@@ -334,7 +334,7 @@ function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: str
   const [dispatching, setDispatching] = useState(false);
   async function openRun(id: string) {
     setError("");
-    try { setDetail(await api<Record<string, any>>("/api/v1/runs/" + id)); setLocale("id"); }
+    try { setDetail(await api<RunDetail>("/api/v1/runs/" + id)); setLocale("id"); }
     catch (e) { setError(e instanceof Error ? e.message : "Gagal memuat detail run"); }
   }
   async function dispatchDelivery() {
@@ -346,7 +346,7 @@ function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: str
     } catch (e) { setError(e instanceof Error ? e.message : "Delivery gagal; periksa status outbox."); }
     finally { setDispatching(false); }
   }
-  const article = detail?.pair?.articles?.find((item: any) => item.locale === locale);
+  const article = detail?.pair?.articles.find((item) => item.locale === locale);
   async function reconcileDelivery(intentId: string, outcome: "succeeded" | "failed") {
     if (!detail) return;
     let remoteId: string | null = null;
@@ -362,8 +362,95 @@ function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: str
     } catch (e) { setError(e instanceof Error ? e.message : "Rekonsiliasi gagal"); }
     finally { setDispatching(false); }
   }
-  const pendingDelivery = detail?.deliveries?.some((item: any) => item.state === "prepared" || item.state === "failed");
-  return <section className="space-y-5"><div><h2 className="section-title">Run history</h2><p className="section-subtitle">Outcome pipeline, keputusan editorial, status pasangan bahasa, dan deadline.</p></div>{capacity && <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span className="status-pill status-gray">Kapasitas {capacity.concurrency} lane</span><span className="status-pill status-gray">{capacity.run_minutes} menit/run</span><span className="status-pill status-blue">{capacity.pending} antre</span>{capacity.counts.at_risk > 0 && <span className="status-pill status-amber">{capacity.counts.at_risk} at risk</span>}{capacity.counts.infeasible > 0 && <span className="status-pill bg-rose-50 text-rose-700">{capacity.counts.infeasible} infeasible</span>}<span>Slot at risk berarti antrean tidak lagi muat sebelum target; mulai lebih awal atau kurangi beban.</span></div>}{error && <ErrorText>{error}</ErrorText>}{runs.length ? <div className="panel overflow-hidden"><RunTable runs={runs} blogs={blogs} onOpen={openRun} /></div> : <EmptyState title="Belum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}{detail && <Modal title={detail.pair?.topic ?? "Detail run"} onClose={() => setDetail(null)}><div className="space-y-4"><div className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4"><MetricSmall label="Status" value={detail.status} /><MetricSmall label="Keputusan" value={detail.editorial_decision ?? "pending"} /><MetricSmall label="Outcome" value={detail.pipeline_outcome ?? "—"} /><MetricSmall label="Pair" value={detail.pair_completeness ?? "none"} /><MetricSmall label="Mode" value={detail.execution_mode ?? "dryrun"} /><MetricSmall label="Kapasitas" value={detail.capacity_state ?? "ok"} /><MetricSmall label="Mulai paling lambat" value={detail.start_by_at ? new Date(detail.start_by_at).toLocaleString("id-ID") : "—"} /></div>{detail.deliveries?.length > 0 && <div className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Delivery outbox</p>{detail.execution_mode !== "dryrun" && pendingDelivery && <button className="secondary-button" disabled={dispatching} onClick={() => void dispatchDelivery()}>{dispatching ? "Mengirim…" : "Kirim ke blog"}</button>}</div><div className="mt-3 space-y-2">{detail.deliveries.map((item: any) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs"><span className="font-medium">{item.unit_key}</span><span className="status-pill status-blue">{item.action}</span><span>{item.state}</span><span className="text-slate-500">{item.remote_status ?? "—"} · {item.remote_id ?? "belum ada remote ID"} · {item.attempts} attempt</span>{item.state === "dispatching" && !item.reconciliation_ready && <span className="text-amber-700">Menunggu request selesai sebelum rekonsiliasi.</span>}{item.reconciliation_ready && (item.state === "unknown" || item.state === "dispatching") && <span className="flex gap-2"><button className="font-semibold text-teal-700" onClick={() => void reconcileDelivery(item.id, "succeeded")}>Sukses</button><button className="font-semibold text-rose-700" onClick={() => void reconcileDelivery(item.id, "failed")}>Gagal</button></span>}</div>)}</div>{detail.execution_mode === "dryrun" ? <p className="mt-3 text-xs leading-5 text-slate-500">Run dry-run hanya menyiapkan intent; tidak ada request yang dikirim ke blog.</p> : <p className="mt-3 text-xs leading-5 text-slate-500">Status remote belum diverifikasi. Request sukses hanya berarti payload diterima API.</p>}</div>}{detail.pair ? <><div className="flex items-center justify-between gap-3"><div><p className="font-semibold">{detail.pair.topic}</p><p className="mt-1 text-xs text-slate-500">{detail.pair.research_question}</p></div><div className="flex gap-2"><button className={locale === "id" ? "primary-button" : "secondary-button"} onClick={() => setLocale("id")}>ID</button><button className={locale === "en" ? "primary-button" : "secondary-button"} onClick={() => setLocale("en")}>EN</button></div></div>{article && <div className="rounded-2xl border border-slate-200 p-5"><h3 className="text-lg font-bold">{article.title}</h3><p className="mt-2 text-sm text-slate-500">{article.summary}</p><pre className="mt-5 max-h-[55vh] overflow-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{article.body}</pre></div>}<details className="rounded-xl bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-semibold">Hasil review dan kebijakan</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5">{JSON.stringify(detail.pair.review, null, 2)}</pre></details></> : <p className="text-sm text-slate-500">Run ini belum menghasilkan pasangan artikel.</p>}</div></Modal>}</section>;
+  const pendingDelivery = detail?.deliveries.some((item) => item.state === "prepared" || item.state === "failed");
+  return <section className="space-y-5">
+    <div><h2 className="section-title">Run history</h2><p className="section-subtitle">Outcome pipeline, keputusan editorial, bukti sumber, trace agent, dan deadline.</p></div>
+    {capacity && <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span className="status-pill status-gray">Kapasitas {capacity.concurrency} lane</span><span className="status-pill status-gray">{capacity.run_minutes} menit/run</span><span className="status-pill status-blue">{capacity.pending} antre</span>{capacity.counts.at_risk > 0 && <span className="status-pill status-amber">{capacity.counts.at_risk} at risk</span>}{capacity.counts.infeasible > 0 && <span className="status-pill bg-rose-50 text-rose-700">{capacity.counts.infeasible} infeasible</span>}<span>Slot at risk berarti antrean tidak lagi muat sebelum target; mulai lebih awal atau kurangi beban.</span></div>}
+    {error && <ErrorText>{error}</ErrorText>}
+    {runs.length ? <div className="panel overflow-hidden"><RunTable runs={runs} blogs={blogs} onOpen={openRun} /></div> : <EmptyState title="Belum ada run" body="Belum ada aktivitas riset atau scheduled slot yang tercatat." />}
+    {detail && <Modal title={detail.pair?.topic ?? "Detail run"} onClose={() => setDetail(null)}>
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4">
+          <MetricSmall label="Status" value={detail.status} /><MetricSmall label="Keputusan" value={detail.editorial_decision ?? "pending"} />
+          <MetricSmall label="Outcome" value={detail.pipeline_outcome ?? "—"} /><MetricSmall label="Pair" value={detail.pair_completeness ?? "none"} />
+          <MetricSmall label="Mode" value={detail.execution_mode ?? "dryrun"} /><MetricSmall label="Kapasitas" value={detail.capacity_state ?? "ok"} />
+          <MetricSmall label="Mulai paling lambat" value={detail.start_by_at ? new Date(detail.start_by_at).toLocaleString("id-ID") : "—"} />
+        </div>
+        {detail.deliveries.length > 0 && <div className="rounded-xl border border-slate-200 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Delivery outbox</p>{detail.execution_mode !== "dryrun" && pendingDelivery && <button className="secondary-button" disabled={dispatching} onClick={() => void dispatchDelivery()}>{dispatching ? "Mengirim…" : "Kirim ke blog"}</button>}</div>
+          <div className="mt-3 space-y-2">{detail.deliveries.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs"><span className="font-medium">{item.unit_key}</span><span className="status-pill status-blue">{item.action}</span><span>{item.state}</span><span className="text-slate-500">{item.remote_status ?? "—"} · {item.remote_id ?? "belum ada remote ID"} · {item.attempts} attempt</span>{item.state === "dispatching" && !item.reconciliation_ready && <span className="text-amber-700">Menunggu request selesai sebelum rekonsiliasi.</span>}{item.reconciliation_ready && (item.state === "unknown" || item.state === "dispatching") && <span className="flex gap-2"><button className="font-semibold text-teal-700" onClick={() => void reconcileDelivery(item.id, "succeeded")}>Sukses</button><button className="font-semibold text-rose-700" onClick={() => void reconcileDelivery(item.id, "failed")}>Gagal</button></span>}</div>)}</div>
+          <p className="mt-3 text-xs leading-5 text-slate-500">{detail.execution_mode === "dryrun" ? "Run dry-run hanya menyiapkan intent; tidak ada request yang dikirim ke blog." : "Status remote belum diverifikasi. Request sukses hanya berarti payload diterima API."}</p>
+        </div>}
+        {detail.pair ? <>
+          <div className="flex items-center justify-between gap-3"><div><p className="font-semibold">{detail.pair.topic}</p><p className="mt-1 text-xs text-slate-500">{detail.pair.research_question}</p></div><div className="flex gap-2"><button className={locale === "id" ? "primary-button" : "secondary-button"} onClick={() => setLocale("id")}>ID</button><button className={locale === "en" ? "primary-button" : "secondary-button"} onClick={() => setLocale("en")}>EN</button></div></div>
+          {article && <div className="rounded-2xl border border-slate-200 p-5"><h3 className="text-lg font-bold">{article.title}</h3><p className="mt-2 text-sm text-slate-500">{article.summary}</p><p className="mt-3 text-xs text-slate-500">Versi {article.locale.toUpperCase()} mencantumkan {article.cited_evidence_ids.length} evidence.</p><pre className="mt-5 max-h-[55vh] overflow-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{article.body}</pre></div>}
+          <EvidenceInspector pair={detail.pair} />
+          <AgentTraceInspector agent={detail.pair.agent} />
+          <details className="rounded-xl bg-slate-50 p-4"><summary className="cursor-pointer text-sm font-semibold">Hasil review editorial</summary><div className="mt-3 space-y-2 text-sm"><p>Review {detail.pair.review.approved ? "disetujui" : "ditahan"} · skor pembaca {detail.pair.review.reader_score ?? "—"}/5 · parity bahasa {detail.pair.review.bilingual_parity ? "lolos" : "belum lolos"}.</p><p>Klaim material {detail.pair.review.material_claims_supported ? "didukung menurut critic" : "belum didukung menurut critic"}.</p>{Array.isArray(detail.pair.review.findings) && detail.pair.review.findings.length > 0 && <ul className="list-disc space-y-1 pl-5 text-slate-600">{detail.pair.review.findings.map((finding: string, index: number) => <li key={index}>{finding}</li>)}</ul>}</div></details>
+        </> : <p className="text-sm text-slate-500">Run ini belum menghasilkan pasangan artikel.</p>}
+      </div>
+    </Modal>}
+  </section>;
+}
+
+function EvidenceInspector({ pair }: { pair: NonNullable<RunDetail["pair"]> }) {
+  const evidenceById = new Map(pair.evidence.map((item) => [item.evidence_id, item]));
+  const sourceById = new Map(pair.sources.map((item) => [item.source_id, item]));
+  function EvidenceQuote({ evidenceId }: { evidenceId: string }) {
+    const item = evidenceById.get(evidenceId);
+    const source = item ? sourceById.get(item.source_id) : undefined;
+    if (!item?.available || !item.quote) return <p className="text-xs text-rose-700">Evidence {evidenceId} tidak tersedia; jangan anggap klaim ini terverifikasi.</p>;
+    const href = safeExternalUrl(source?.url);
+    return <blockquote className="rounded-lg border-l-2 border-teal-400 bg-white px-3 py-2 text-xs leading-5 text-slate-600">
+      <p>“{item.quote}”</p>
+      <p className="mt-1 text-slate-400">{item.locator || "Lokasi kutipan tidak dicatat"} · {href ? <a className="font-medium text-teal-700 underline" href={href} target="_blank" rel="noopener noreferrer">{source?.title || source?.source_id}</a> : source?.title || item.source_id}</p>
+    </blockquote>;
+  }
+  return <section className="rounded-xl border border-slate-200 p-4">
+    <div><h3 className="text-sm font-semibold">Klaim dan evidence</h3><p className="mt-1 text-xs text-slate-500">Label dukungan berasal dari agent riset; kutipan dan sumber ditampilkan agar bisa diperiksa.</p></div>
+    {pair.claims.length > 0 ? <div className="mt-3 space-y-3">{pair.claims.map((claim, index) => <article key={`${claim.claim}-${index}`} className="rounded-xl bg-slate-50 p-3">
+      <div className="flex flex-wrap items-center gap-2"><span className="status-pill status-gray">{claim.importance}</span><SupportStatus support={claim.support} /></div>
+      <p className="mt-2 text-sm font-medium">{claim.claim}</p>
+      {claim.qualification && <p className="mt-1 text-xs text-slate-500">{claim.qualification}</p>}
+      <div className="mt-2 space-y-2">{claim.evidence_ids.map((evidenceId) => <EvidenceQuote key={evidenceId} evidenceId={evidenceId} />)}</div>
+    </article>)}</div> : <p className="mt-3 text-sm text-slate-500">Klaim belum tersimpan untuk run ini.</p>}
+    <details className="mt-3 rounded-lg bg-slate-50 p-3"><summary className="cursor-pointer text-xs font-semibold">Semua sumber ({pair.sources.length}) dan kutipan ({pair.evidence.length})</summary>
+      <div className="mt-3 space-y-2">{pair.sources.map((source) => {
+        const href = safeExternalUrl(source.url);
+        return <div key={source.source_id} className="rounded-lg border border-slate-200 bg-white p-3 text-xs">
+          <p className="font-semibold">{href ? <a className="text-teal-700 underline" href={href} target="_blank" rel="noopener noreferrer">{source.title || source.source_id}</a> : source.title || source.source_id}</p>
+          <p className="mt-1 text-slate-500">{source.source_type} · {source.read_status} · peer review {source.peer_reviewed === null ? "belum diketahui" : source.peer_reviewed ? "tercatat" : "tidak"}{source.retracted ? " · ditarik" : ""}</p>
+          {!source.available && <p className="mt-1 text-rose-700">Metadata sumber tidak tersedia di database.</p>}
+        </div>;
+      })}{pair.evidence.filter((item) => !item.available).map((item) => <p key={item.evidence_id} className="text-xs text-rose-700">Kutipan {item.evidence_id} hilang dari penyimpanan.</p>)}</div>
+    </details>
+  </section>;
+}
+
+function AgentTraceInspector({ agent }: { agent: RunAgentMetrics }) {
+  const trace = agent.trace ?? [];
+  return <details className="rounded-xl border border-slate-200 p-4">
+    <summary className="cursor-pointer text-sm font-semibold">Trace agent ({trace.length} event)</summary>
+    <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="status-pill status-gray">{agent.physical_requests ?? 0} request model</span><span className="status-pill status-gray">{agent.research_physical_requests ?? 0} request riset</span><span className="status-pill status-gray">{agent.tool_actions ?? 0} aksi tool</span></div>
+    {trace.length > 0 ? <ol className="mt-3 space-y-2">{trace.map((event, index) => <li key={`${event.type}-${index}`} className="rounded-lg bg-slate-50 px-3 py-2 text-xs">
+      {event.type === "model_response" ? <><span className="font-semibold">Model #{(event.step ?? index) + 1}</span><span className="ml-2 text-slate-500">{event.stop_reason ?? "response"} · {event.tokens_in ?? "—"} input / {event.tokens_out ?? "—"} output tokens</span></> : <><span className="font-semibold">Tool {event.name ?? "unknown"}</span><span className="ml-2 status-pill status-gray">{event.status ?? "unknown"}</span>{event.reason && <p className="mt-1 text-rose-700">{event.reason}</p>}</>}
+    </li>)}</ol> : <p className="mt-3 text-sm text-slate-500">Trace belum tersimpan untuk run ini.</p>}
+  </details>;
+}
+
+function SupportStatus({ support }: { support: string }) {
+  const className = support === "supported" ? "status-green" : support === "contradicted" ? "bg-rose-50 text-rose-700" : "status-amber";
+  return <span className={`status-pill ${className}`}>{support}</span>;
+}
+
+function safeExternalUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function RunTable({ runs, blogs, onOpen }: { runs: Run[]; blogs: Blog[]; onOpen?: (id: string) => void }) {

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
 from fastapi.testclient import TestClient
 
+import takumi_research_agent.api.app as api_module
 from takumi_research_agent.api.app import create_app
 from takumi_research_agent.config import Settings
 from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import Base, BlogProfile, DeliveryAttempt, DeliveryIntent, GlobalSettings, ProviderProfile, Run
+from takumi_research_agent.persistence.models import ArticlePairRecord, ArticleVersion, Base, BlogProfile, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, SourceRecord as SourceRecordRow
+from takumi_research_agent.security import SecretCipher
 
 
 def test_setup_login_csrf_and_ten_blog_limit():
@@ -277,4 +281,174 @@ def test_reconciliation_waits_for_stale_dispatch_and_finalizes_attempt():
             assert attempt.outcome == "succeeded" and attempt.finished_at is not None
             assert attempt.response_summary["reconciled"] is True
             assert attempt.response_summary["note"] == "Confirmed in blog history"
+    engine.dispose()
+
+
+def test_run_detail_exposes_agent_trace_claim_links_and_verifiable_quotes():
+    engine, sessions = create_database("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    settings = replace(Settings.from_env(env_file=None), master_key="test-master-key-" * 4, session_cookie_secure=False)
+    app = create_app(settings, engine=engine, sessions=sessions)
+    content_hash = "a" * 64
+    with sessions.begin() as db:
+        blog = BlogProfile(id="blog-detail", name="Trace blog", base_url="https://blog.example/api")
+        db.add(blog)
+        db.flush()
+        db.add(Run(
+            id="run-detail",
+            blog_id=blog.id,
+            editorial_date=date(2026, 11, 10),
+            quota_slot_key="slot-detail",
+            target_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            execution_mode="dryrun",
+            config_snapshot={},
+            status="completed",
+            stage="completed",
+        ))
+        db.add(SourceRecordRow(
+            id="doi:10.5555/detail",
+            url="https://journal.example/detail",
+            title="Controlled study of measured cells",
+            source_type="journal",
+            metadata_json={"peer_reviewed": True, "peer_review_basis": "journal_policy", "read_status": "full_text"},
+        ))
+        db.add(ArticlePairRecord(
+            id="pair-detail",
+            run_id="run-detail",
+            topic="A measured change in cell survival",
+            field="biology",
+            research_question="What did the controlled study measure?",
+            decision="draft",
+            review_result={
+                "approved": True,
+                "reader_score": 4,
+                "material_claims_supported": True,
+                "bilingual_parity": True,
+                "findings": [],
+                "agent": {
+                    "physical_requests": 3,
+                    "research_physical_requests": 2,
+                    "tool_actions": 1,
+                    "trace": [{"type": "tool", "name": "sources.read", "status": "ok"}],
+                },
+                "sources": [{"source_id": "doi:10.5555/detail", "content_hash": content_hash, "read_status": "full_text", "retracted": False}],
+                "evidence": [{"evidence_id": "evidence-detail-1", "source_id": "doi:10.5555/detail", "content_hash": content_hash}],
+                "claims": [{"claim": "Measured cell survival increased in the study.", "evidence_ids": ["evidence-detail-1"], "importance": "critical", "support": "supported"}],
+            },
+        ))
+        db.add(EvidenceSpanRecord(
+            id="evidence-detail-1",
+            source_id="doi:10.5555/detail",
+            content_hash=content_hash,
+            quote="Measured cell survival increased under controlled conditions.",
+            locator="Results, paragraph 2",
+            artifact_path="/tmp/not-read-by-detail-endpoint",
+        ))
+        db.add(ArticleVersion(
+            pair_id="pair-detail",
+            locale="en",
+            version=1,
+            title="What the cell study measured",
+            body_markdown="Article body",
+            final_body="Article body",
+            body_hash="b" * 64,
+            metadata_json={"summary": "An explanation for readers.", "cited_evidence_ids": ["evidence-detail-1"]},
+        ))
+
+    with TestClient(app) as client:
+        bootstrap = client.post("/api/v1/setup/admin", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        assert bootstrap.status_code == 201
+        login = client.post("/api/v1/auth/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        detail = client.get("/api/v1/runs/run-detail")
+        assert detail.status_code == 200
+        pair = detail.json()["pair"]
+        assert "agent" not in pair["review"]
+        assert pair["agent"]["trace"] == [{"type": "tool", "name": "sources.read", "status": "ok"}]
+        assert pair["claims"][0]["evidence_ids"] == ["evidence-detail-1"]
+        assert pair["sources"][0]["title"] == "Controlled study of measured cells"
+        assert pair["sources"][0]["available"] is True
+        assert pair["evidence"][0]["quote"] == "Measured cell survival increased under controlled conditions."
+        assert pair["articles"][0]["cited_evidence_ids"] == ["evidence-detail-1"]
+    engine.dispose()
+
+
+def test_sandbox_create_capability_requires_ack_pause_clear_and_posts_draft(monkeypatch):
+    engine, sessions = create_database("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    master_key = "test-master-key-" * 4
+    settings = replace(Settings.from_env(env_file=None), master_key=master_key, session_cookie_secure=False)
+    app = create_app(settings, engine=engine, sessions=sessions)
+    mapping = {
+        "list_path": "$.data.items",
+        "response_fields": {"id": "$.post.id", "title": "$.post.title", "content": "$.post.content"},
+        "create_fields": {"title": "$.article.title", "content": "$.article.body", "locale": "$.article.language", "status": "$.article.state"},
+        "publish_status_values": {"draft": "drafting", "publish": "live"},
+    }
+    with sessions.begin() as db:
+        db.add(GlobalSettings(id=1, recovery_mode=False, content_mutations_paused=True, revision=1))
+        db.add(BlogProfile(
+            id="blog-sandbox",
+            name="Sandbox blog",
+            base_url="https://sandbox.example/api",
+            encrypted_api_token=SecretCipher(master_key).encrypt("sandbox-token"),
+            adapter_mapping=mapping,
+            capabilities={
+                "list_operation": {"operation_id": "listPosts", "method": "get", "path": "/posts"},
+                "create_operation": {"operation_id": "createPost", "method": "post", "path": "/posts"},
+            },
+            capability_result={"list_posts": True, "history_complete": True},
+        ))
+
+    seen = []
+
+    def fake_blog(request: httpx.Request):
+        seen.append({
+            "url": str(request.url),
+            "authorization": request.headers.get("Authorization"),
+            "payload": json.loads(request.content),
+            "idempotency_key": request.headers.get("Idempotency-Key"),
+        })
+        return httpx.Response(201, json={"post": {"id": "sandbox-draft-42"}})
+
+    adapter_type = api_module.BlogApiAdapter
+    monkeypatch.setattr(api_module, "BlogApiAdapter", lambda **kwargs: adapter_type(**kwargs, transport=httpx.MockTransport(fake_blog)))
+    with TestClient(app) as client:
+        bootstrap = client.post("/api/v1/setup/admin", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        assert bootstrap.status_code == 201
+        login = client.post("/api/v1/auth/login", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        csrf = login.json()["csrf_token"]
+        path = "/api/v1/blogs/blog-sandbox/adapter/test-create"
+
+        missing_ack = client.post(path, headers={"X-CSRF-Token": csrf}, json={"acknowledge_remote_write": False})
+        assert missing_ack.status_code == 409
+        while_paused = client.post(path, headers={"X-CSRF-Token": csrf}, json={"acknowledge_remote_write": True})
+        assert while_paused.status_code == 409
+        assert seen == []
+
+        with sessions.begin() as db:
+            control = db.get(GlobalSettings, 1)
+            control.recovery_mode = True
+            control.content_mutations_paused = False
+        while_recovering = client.post(path, headers={"X-CSRF-Token": csrf}, json={"acknowledge_remote_write": True})
+        assert while_recovering.status_code == 409
+        assert seen == []
+
+        with sessions.begin() as db:
+            control = db.get(GlobalSettings, 1)
+            control.recovery_mode = False
+            control.content_mutations_paused = False
+        passed = client.post(path, headers={"X-CSRF-Token": csrf}, json={"acknowledge_remote_write": True})
+        assert passed.status_code == 200, passed.text
+        assert passed.json()["create_draft"] is True
+        assert passed.json()["remote_id"] == "sandbox-draft-42"
+        assert len(seen) == 1
+        assert seen[0]["url"] == "https://sandbox.example/api/posts"
+        assert seen[0]["authorization"] == "Bearer sandbox-token"
+        assert seen[0]["payload"]["article"]["state"] == "drafting"
+        assert "Takumi capability check" in seen[0]["payload"]["article"]["title"]
+        assert passed.json()["request_payload"] == seen[0]["payload"]
+        with sessions() as db:
+            capability = db.get(BlogProfile, "blog-sandbox").capability_result
+            assert capability["sandbox_create"] is True
+            assert capability["create_remote_id"] == "sandbox-draft-42"
     engine.dispose()
