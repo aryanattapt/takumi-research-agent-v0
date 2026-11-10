@@ -67,6 +67,72 @@ async def test_list_pagination_detects_repeated_cursor():
 
 
 @pytest.mark.asyncio
+async def test_history_batch_checkpoint_resumes_cursor_pagination():
+    requests: list[str | None] = []
+
+    def handler(request: httpx.Request):
+        cursor = request.url.params.get("cursor")
+        requests.append(cursor)
+        if cursor is None:
+            return httpx.Response(200, json={"data": {"items": [{"post": {"id": "1", "title": "First", "content": "Body"}}], "next": "cursor-2"}})
+        return httpx.Response(200, json={"data": {"items": [{"post": {"id": "2", "title": "Second", "content": "Body"}}], "next": None}})
+
+    adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=mapping(pagination_mode="cursor", page_next_path="$.data.next", page_request_parameter="cursor", page_limit=5),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first = await adapter.read_history_batch(max_pages=1)
+        assert [record["id"] for record in first.records] == ["1"]
+        assert not first.complete
+        assert first.checkpoint is not None
+
+        second = await adapter.read_history_batch(checkpoint=first.checkpoint.to_dict(), max_pages=1)
+        assert [record["id"] for record in second.records] == ["2"]
+        assert second.complete
+        assert second.checkpoint is None
+        assert requests == [None, "cursor-2"]
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_history_checkpoint_is_rejected_after_mapping_changes():
+    def handler(_request: httpx.Request):
+        return httpx.Response(200, json={"data": {"items": [{"post": {"id": "1", "title": "First", "content": "Body"}}], "next": "cursor-2"}})
+
+    cursor_mapping = mapping(pagination_mode="cursor", page_next_path="$.data.next", page_request_parameter="cursor", page_limit=5)
+    adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=cursor_mapping,
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True),
+        transport=httpx.MockTransport(handler),
+    )
+    changed_adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=cursor_mapping.model_copy(update={"page_size": 50}),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first = await adapter.read_history_batch(max_pages=1)
+        assert first.checkpoint is not None
+        with pytest.raises(ContractError, match="does not match"):
+            await changed_adapter.read_history_batch(checkpoint=first.checkpoint.to_dict(), max_pages=1)
+    finally:
+        await adapter.close()
+        await changed_adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_timeout_becomes_unknown_and_keeps_same_intent_key():
     def handler(_request: httpx.Request):
         raise httpx.ReadTimeout("timeout")

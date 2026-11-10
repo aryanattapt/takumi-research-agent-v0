@@ -14,11 +14,26 @@ def editorial_decision(
     reasons: list[str] = []
     required_languages = {"id", "en"}
     complete = set(pair.articles) == required_languages
-    critical_supported = all(
+    critical_claims_supported = all(
         claim.support == "supported"
         for claim in pair.claims
         if claim.importance == "critical"
     )
+    important_claims = [claim for claim in pair.claims if claim.importance in {"critical", "material"}]
+    unsupported_important_claims = [
+        claim for claim in important_claims if claim.support in {"contradicted", "unknown"}
+    ]
+    unsupported_critical_claims = [
+        claim for claim in pair.claims if claim.importance == "critical" and claim.support != "supported"
+    ]
+    partially_supported_material_claims = [
+        claim for claim in pair.claims if claim.importance == "material" and claim.support == "partial"
+    ]
+    unresolved_context_claims = [
+        claim for claim in pair.claims if claim.importance == "context" and claim.support != "supported"
+    ]
+    contradicted_claims = [claim for claim in pair.claims if claim.support == "contradicted"]
+    has_retracted_source = any(source.retracted for source in pair.sources)
     if not complete:
         reasons.append("Both Indonesian and English versions are required.")
     if not novelty_clear:
@@ -31,17 +46,31 @@ def editorial_decision(
         reasons.append("The Indonesian and English versions are materially inconsistent.")
     if not review.approved or review.reader_score < 4:
         reasons.append("Editorial review did not meet the reader-quality gate.")
-    if any(claim.importance == "critical" and claim.support != "supported" for claim in pair.claims):
+    if unsupported_critical_claims:
         reasons.append("A critical claim is unsupported, contradicted, or unresolved.")
-    if any(source.retracted for source in pair.sources):
+    if unsupported_important_claims:
+        reasons.append("A material or critical claim is contradicted or lacks confirmed support.")
+    if partially_supported_material_claims:
+        reasons.append("A material claim is only partially supported; human revision is required before publication.")
+    if unresolved_context_claims:
+        reasons.append("A context claim is not fully supported; human review is required before publication.")
+    if has_retracted_source:
         reasons.append("A retracted source is present and must be removed or resolved.")
 
     if reasons:
+        must_block = (
+            not credible_sources
+            or not review.material_claims_supported
+            or bool(unsupported_important_claims)
+            or bool(unsupported_critical_claims)
+            or bool(contradicted_claims)
+            or has_retracted_source
+        )
         return EditorialDecision(
-            decision="blocked" if not credible_sources or not review.material_claims_supported or not critical_supported else "draft",
+            decision="blocked" if must_block else "draft",
             reasons=reasons,
             journal_support_sufficient=False,
-            critical_claims_supported=critical_supported,
+            critical_claims_supported=critical_claims_supported,
             both_languages_complete=complete,
         )
 
@@ -57,6 +86,6 @@ def editorial_decision(
         decision="publish" if journal_support else "draft",
         reasons=[] if journal_support else ["Credible evidence is available, but relevant peer-reviewed journal support is not confirmed."],
         journal_support_sufficient=journal_support,
-        critical_claims_supported=critical_supported,
+        critical_claims_supported=critical_claims_supported,
         both_languages_complete=complete,
     )

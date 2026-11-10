@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "scope": "Deterministic editorial policy regression cases; not a research-quality holdout or model qualification suite.",
+  "cases": [
+    {"id": "supported_claim_and_journal", "importance": "critical", "support": "supported", "expected": "publish"},
+    {"id": "no_confirmed_journal_support", "importance": "critical", "support": "supported", "journal_support": false, "expected": "draft"},
+    {"id": "review_not_approved", "importance": "critical", "support": "supported", "review_approved": false, "expected": "draft"},
+    {"id": "reader_score_below_gate", "importance": "critical", "support": "supported", "reader_score": 3, "expected": "draft"},
+    {"id": "bilingual_parity_failed", "importance": "critical", "support": "supported", "bilingual_parity": false, "expected": "draft"},
+    {"id": "novelty_unresolved", "importance": "critical", "support": "supported", "novelty_clear": false, "expected": "draft"},
+    {"id": "one_language_missing", "importance": "critical", "support": "supported", "both_languages": false, "expected": "draft"},
+    {"id": "no_credible_source", "importance": "critical", "support": "supported", "credible_sources": false, "expected": "blocked"},
+    {"id": "review_flags_unsupported_material", "importance": "critical", "support": "supported", "material_claims_supported": false, "expected": "blocked"},
+    {"id": "critical_unknown", "importance": "critical", "support": "unknown", "expected": "blocked"},
+    {"id": "critical_partial", "importance": "critical", "support": "partial", "expected": "blocked"},
+    {"id": "critical_contradicted", "importance": "critical", "support": "contradicted", "expected": "blocked"},
+    {"id": "material_unknown", "importance": "material", "support": "unknown", "expected": "blocked"},
+    {"id": "material_contradicted", "importance": "material", "support": "contradicted", "expected": "blocked"},
+    {"id": "material_partial", "importance": "material", "support": "partial", "expected": "draft"},
+    {"id": "retracted_source", "importance": "critical", "support": "supported", "retracted": true, "expected": "blocked"},
+    {"id": "uncertain_context_claim", "importance": "context", "support": "unknown", "expected": "draft"},
+    {"id": "contradicted_context_claim", "importance": "context", "support": "contradicted", "expected": "blocked"}
+  ]
+}

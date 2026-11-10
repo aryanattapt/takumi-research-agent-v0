@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -24,6 +25,75 @@ class BlogCapabilities:
     idempotency_key: bool = False
     lookup_by_external_key: bool = False
     pagination: Literal["none", "cursor", "offset", "page"] = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryCheckpoint:
+    """Opaque continuation state for a bounded history read; store it privately and do not log it."""
+
+    pagination_mode: Literal["none", "cursor", "offset", "page"]
+    mapping_hash: str
+    next_cursor: str | None = None
+    next_page: int = 1
+    next_offset: int = 0
+    pages_completed: int = 0
+    records_seen: int = 0
+    seen_cursors: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "pagination_mode": self.pagination_mode,
+            "mapping_hash": self.mapping_hash,
+            "next_cursor": self.next_cursor,
+            "next_page": self.next_page,
+            "next_offset": self.next_offset,
+            "pages_completed": self.pages_completed,
+            "records_seen": self.records_seen,
+            "seen_cursors": list(self.seen_cursors),
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any], *, mapping: BlogMapping, mapping_hash: str) -> "HistoryCheckpoint":
+        if not isinstance(value, dict) or value.get("version") != 1:
+            raise ContractError("History checkpoint version is invalid")
+        if value.get("pagination_mode") != mapping.pagination_mode or value.get("mapping_hash") != mapping_hash:
+            raise ContractError("History checkpoint does not match the active blog mapping")
+        if any(type(value.get(name, default)) is not int for name, default in (("next_page", 1), ("next_offset", 0), ("pages_completed", 0), ("records_seen", 0))):
+            raise ContractError("History checkpoint counters must be integers")
+        next_page = value.get("next_page", 1)
+        next_offset = value.get("next_offset", 0)
+        pages_completed = value.get("pages_completed", 0)
+        records_seen = value.get("records_seen", 0)
+        if not 1 <= next_page <= mapping.page_limit or not 0 <= next_offset <= 20_000 or not 0 <= pages_completed < mapping.page_limit or not 0 <= records_seen <= 20_000:
+            raise ContractError("History checkpoint exceeds configured page or record limits")
+        next_cursor = value.get("next_cursor")
+        if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor or len(next_cursor) > 2_000):
+            raise ContractError("History checkpoint cursor is invalid")
+        raw_seen = value.get("seen_cursors", [])
+        if not isinstance(raw_seen, list) or len(raw_seen) > mapping.page_limit or any(not isinstance(item, str) or not item or len(item) > 2_000 for item in raw_seen):
+            raise ContractError("History checkpoint cursor history is invalid")
+        seen_cursors = tuple(raw_seen)
+        if len(set(seen_cursors)) != len(seen_cursors) or (next_cursor is not None and next_cursor not in seen_cursors):
+            raise ContractError("History checkpoint cursor history is inconsistent")
+        return cls(
+            pagination_mode=mapping.pagination_mode,
+            mapping_hash=mapping_hash,
+            next_cursor=next_cursor,
+            next_page=next_page,
+            next_offset=next_offset,
+            pages_completed=pages_completed,
+            records_seen=records_seen,
+            seen_cursors=seen_cursors,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryBatch:
+    records: tuple[dict[str, Any], ...]
+    checkpoint: HistoryCheckpoint | None
+    complete: bool
+    pages_read: int
 
 
 class BlogApiAdapter:
@@ -94,39 +164,90 @@ class BlogApiAdapter:
     async def list_posts(self) -> list[dict[str, Any]]:
         if not self.capabilities.list_posts:
             raise ContractError("Blog adapter has not passed the list capability check")
+        results: list[dict[str, Any]] = []
+        seen_record_ids: set[tuple[str, str]] = set()
+        checkpoint: HistoryCheckpoint | None = None
+        while True:
+            batch = await self.read_history_batch(checkpoint=checkpoint, max_pages=self.mapping.page_limit)
+            for record in batch.records:
+                record_id = (str(record["id"]), str(record.get("language", "")))
+                if record_id in seen_record_ids:
+                    continue
+                seen_record_ids.add(record_id)
+                results.append(record)
+                if len(results) > 20_000:
+                    raise ContractError("Blog history exceeds the configured 20,000-record safety limit")
+            if batch.complete:
+                return results
+            if batch.checkpoint is None:
+                raise ContractError("History pagination stopped without a continuation checkpoint")
+            checkpoint = batch.checkpoint
+
+    def _history_mapping_hash(self) -> str:
+        mapping_json = json.dumps(self.mapping.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(mapping_json.encode("utf-8")).hexdigest()
+
+    async def read_history_batch(
+        self,
+        *,
+        checkpoint: HistoryCheckpoint | dict[str, Any] | None = None,
+        max_pages: int = 1,
+    ) -> HistoryBatch:
+        """Read bounded pages; the private checkpoint lets a caller resume after persisting a batch."""
+        if not self.capabilities.list_posts:
+            raise ContractError("Blog adapter has not passed the list capability check")
+        if type(max_pages) is not int or not 1 <= max_pages <= self.mapping.page_limit:
+            raise ContractError("History batch page count is outside the configured limit")
+        mapping_hash = self._history_mapping_hash()
+        if checkpoint is None:
+            state = HistoryCheckpoint(self.mapping.pagination_mode, mapping_hash)
+        elif isinstance(checkpoint, HistoryCheckpoint):
+            state = HistoryCheckpoint.from_dict(checkpoint.to_dict(), mapping=self.mapping, mapping_hash=mapping_hash)
+        else:
+            state = HistoryCheckpoint.from_dict(checkpoint, mapping=self.mapping, mapping_hash=mapping_hash)
+        if state.pages_completed >= self.mapping.page_limit:
+            raise ContractError("Configured pagination limit reached; history is incomplete")
+
         url = self._url(self.list_operation.path)
         results: list[dict[str, Any]] = []
-        seen_cursors: set[str] = set()
         seen_record_ids: set[tuple[str, str]] = set()
-        params: dict[str, Any] = {}
-        page_value = 1
-        offset_value = 0
-        for page_index in range(self.mapping.page_limit):
+        seen_cursors = set(state.seen_cursors)
+        current = state
+        pages_read = 0
+        for _ in range(max_pages):
+            if current.pages_completed >= self.mapping.page_limit:
+                raise ContractError("Configured pagination limit reached; history is incomplete")
+            params: dict[str, Any] = {}
             if self.mapping.pagination_mode == "page":
                 if not self.mapping.page_request_parameter:
                     raise ContractError("Page pagination requires a request parameter")
-                params[self.mapping.page_request_parameter] = page_value
+                params[self.mapping.page_request_parameter] = current.next_page
                 if self.mapping.page_size_parameter:
                     params[self.mapping.page_size_parameter] = self.mapping.page_size
             elif self.mapping.pagination_mode == "offset":
                 if not self.mapping.page_request_parameter:
-                    raise ContractError("Offset pagination requires an offset request parameter")
-                params[self.mapping.page_request_parameter] = offset_value
+                    raise ContractError("Offset pagination requires a request parameter")
+                params[self.mapping.page_request_parameter] = current.next_offset
                 if self.mapping.page_size_parameter:
                     params[self.mapping.page_size_parameter] = self.mapping.page_size
             if self.mapping.pagination_mode == "cursor" and self.mapping.page_size_parameter:
                 params[self.mapping.page_size_parameter] = self.mapping.page_size
+            if self.mapping.pagination_mode == "cursor" and current.next_cursor:
+                if not self.mapping.page_request_parameter:
+                    raise ContractError("Cursor pagination requires a request parameter")
+                params[self.mapping.page_request_parameter] = current.next_cursor
+
             payload = await self._read_history_page(url, params)
             records = normalize_records(payload, self.mapping)
-            fresh_records = []
+            fresh_records: list[dict[str, Any]] = []
             for record in records:
                 record_id = (str(record["id"]), str(record.get("language", "")))
                 if record_id not in seen_record_ids:
                     fresh_records.append(record)
                     seen_record_ids.add(record_id)
-            if page_index > 0 and records and not fresh_records:
+            if current.pages_completed + pages_read > 0 and records and not fresh_records:
                 raise ContractError("Blog API pagination made no progress; history is incomplete")
-            if len(results) + len(fresh_records) > 20_000:
+            if current.records_seen + len(fresh_records) > 20_000:
                 raise ContractError("Blog history exceeds the configured 20,000-record safety limit")
             for record in fresh_records:
                 if "title" in record:
@@ -136,33 +257,66 @@ class BlogApiAdapter:
                 if "summary" in record:
                     record["summary"] = str(record["summary"])[:2_500]
             results.extend(fresh_records)
+            pages_read += 1
+            pages_completed = current.pages_completed + 1
+
             if self.mapping.pagination_mode == "none":
                 if has_unmapped_pagination_hint(payload, self.mapping.list_path):
-                    raise ContractError("Response exposes a pagination hint; configure its cursor/page mapping before treating history as complete")
-                return results
+                    raise ContractError("Response exposes a pagination hint; configure its pagination mapping before treating history as complete")
+                return HistoryBatch(tuple(results), None, True, pages_read)
             if self.mapping.pagination_mode == "cursor":
                 if not self.mapping.page_next_path or not self.mapping.page_request_parameter:
                     raise ContractError("Cursor pagination requires next path and request parameter")
                 next_value = get_path(payload, self.mapping.page_next_path)
-                if next_value in (None, "", False):
-                    return results
+                if next_value is None or next_value is False or next_value == "":
+                    return HistoryBatch(tuple(results), None, True, pages_read)
                 cursor = str(next_value)
                 if cursor in seen_cursors:
                     raise ContractError("Blog API repeated a pagination cursor")
                 seen_cursors.add(cursor)
-                params[self.mapping.page_request_parameter] = cursor
+                next_state = HistoryCheckpoint(
+                    pagination_mode=self.mapping.pagination_mode,
+                    mapping_hash=mapping_hash,
+                    next_cursor=cursor,
+                    next_page=current.next_page,
+                    next_offset=current.next_offset,
+                    pages_completed=pages_completed,
+                    records_seen=current.records_seen + len(fresh_records),
+                    seen_cursors=tuple(sorted(seen_cursors)),
+                )
             elif self.mapping.pagination_mode == "page":
                 next_value = get_path(payload, self.mapping.page_next_path) if self.mapping.page_next_path else None
-                if self.mapping.page_next_path and next_value in (None, "", False):
-                    return results
+                if self.mapping.page_next_path and (next_value is None or next_value is False or next_value == ""):
+                    return HistoryBatch(tuple(results), None, True, pages_read)
                 if not self.mapping.page_next_path and len(records) < self.mapping.page_size:
-                    return results
-                page_value += 1
-            elif self.mapping.pagination_mode == "offset":
+                    return HistoryBatch(tuple(results), None, True, pages_read)
+                next_state = HistoryCheckpoint(
+                    pagination_mode=self.mapping.pagination_mode,
+                    mapping_hash=mapping_hash,
+                    next_page=current.next_page + 1,
+                    next_offset=current.next_offset,
+                    pages_completed=pages_completed,
+                    records_seen=current.records_seen + len(fresh_records),
+                    seen_cursors=current.seen_cursors,
+                )
+            else:
                 if len(records) < self.mapping.page_size:
-                    return results
-                offset_value += len(records)
-        raise ContractError("Configured pagination limit reached; history is incomplete")
+                    return HistoryBatch(tuple(results), None, True, pages_read)
+                next_state = HistoryCheckpoint(
+                    pagination_mode=self.mapping.pagination_mode,
+                    mapping_hash=mapping_hash,
+                    next_page=current.next_page,
+                    next_offset=current.next_offset + len(records),
+                    pages_completed=pages_completed,
+                    records_seen=current.records_seen + len(fresh_records),
+                    seen_cursors=current.seen_cursors,
+                )
+            if pages_completed >= self.mapping.page_limit:
+                raise ContractError("Configured pagination limit reached; history is incomplete")
+            current = next_state
+            if pages_read >= max_pages:
+                return HistoryBatch(tuple(results), current, False, pages_read)
+        raise ContractError("History batch ended without a completion status")
 
     async def create(self, canonical: dict[str, Any], *, intent_key: str, publish: bool) -> dict[str, Any]:
         payload = build_create_payload(canonical, self.mapping)
