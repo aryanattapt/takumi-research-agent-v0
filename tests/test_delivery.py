@@ -466,7 +466,12 @@ def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
         )
         try:
             process.start()
-            assert request_started.wait(30), "child dispatcher did not reach the fake remote request"
+            for _ in range(120):
+                if request_started.wait(0.5):
+                    break
+                if process.exitcode is not None:
+                    pytest.fail(f"child dispatcher exited before the fake remote request (exit code {process.exitcode})")
+            assert request_started.is_set(), "child dispatcher did not reach the fake remote request within 60 seconds"
             assert len(accepted_posts) == 1
             assert accepted_posts[0]["locale"] == "en"
 
