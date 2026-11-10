@@ -14,14 +14,14 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
 from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, OpenApiLoader, Operation, build_create_payload, get_path, infer_collection_path, infer_response_mapping, normalize_records
 from takumi_research_agent.config import Settings
-from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
+from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService, delivery_reconciliation_ready, pending_delivery_attempt
 from takumi_research_agent.persistence.database import create_database
 from takumi_research_agent.persistence.models import AdminSession, AdminUser, ArticlePairRecord, ArticleVersion, BlogProfile, ContentLedger, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, RunEvent
 from takumi_research_agent.orchestration.capacity import (
@@ -884,7 +884,23 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
         if intent.state not in {"unknown", "dispatching"}:
             raise HTTPException(status.HTTP_409_CONFLICT, "Only unknown or stale dispatching intents can be reconciled")
         now = datetime.now(timezone.utc)
-        intent.state = "succeeded" if body.outcome == "succeeded" else "failed"
+        if intent.state == "dispatching" and not delivery_reconciliation_ready(db, intent, now=now):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Delivery request may still be in flight; wait before reconciling")
+        next_state = "succeeded" if body.outcome == "succeeded" else "failed"
+        claimed = db.execute(
+            update(DeliveryIntent)
+            .where(
+                DeliveryIntent.id == intent.id,
+                DeliveryIntent.run_id == run_id,
+                DeliveryIntent.state == intent.state,
+            )
+            .values(state=next_state)
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if claimed != 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Delivery intent was already reconciled")
+        intent.state = next_state
+        attempt = pending_delivery_attempt(db, intent.id)
         if body.remote_id:
             intent.remote_id = body.remote_id[:300]
         intent.response_summary = {
@@ -893,6 +909,16 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             "remote_id": intent.remote_id,
             "note": (body.note or "")[:500],
         }
+        if attempt is not None:
+            attempt.finished_at = now
+            attempt.outcome = body.outcome
+            attempt.response_summary = {
+                **(attempt.response_summary or {}),
+                "reconciled": True,
+                "outcome": body.outcome,
+                "remote_id": intent.remote_id,
+                "note": (body.note or "")[:300],
+            }
         ledger = db.scalar(
             select(ContentLedger).where(
                 ContentLedger.blog_id == intent.blog_id,
@@ -953,6 +979,7 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
                 "local_state": ledger.local_state if ledger else None,
                 "operation_id": intent.operation_id,
                 "attempts": db.scalar(select(func.count()).select_from(DeliveryAttempt).where(DeliveryAttempt.intent_id == intent.id)) or 0,
+                "reconciliation_ready": delivery_reconciliation_ready(db, intent),
                 "response": intent.response_summary,
             })
         return {

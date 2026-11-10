@@ -24,10 +24,13 @@ prepared ──claim──> dispatching ──success──> succeeded
     │                    └──timeout/5xx─> unknown   (terminal, manual reconcile)
     └──fingerprint berubah──> invalidated (terminal)
 
-dispatching ditemukan saat dispatch berikutnya ──> unknown
+dispatching lebih dari 2 menit ──> unknown
 ```
 
+Intent yang masih `dispatching` dianggap stale hanya setelah dua menit tanpa attempt yang selesai. Sebelum itu, dispatcher kedua harus membiarkan request tetap berjalan dan dashboard tidak menawarkan rekonsiliasi. Setelah window lewat, dispatcher berikutnya dapat mengubahnya menjadi `unknown`; intent tetap tidak dikirim ulang otomatis.
+
 - `unknown` tidak di-retry otomatis. Selesaikan lewat endpoint rekonsiliasi operator (`POST /api/v1/runs/{run_id}/delivery/{intent_id}/reconcile` dengan `outcome: succeeded|failed` dan `remote_id` opsional); endpoint mencatat event audit dan tidak membuat intent/key baru.
+- Rekonsiliasi `dispatching`/`unknown` menutup attempt yang belum selesai. Claim state intent harus atomik agar dua operator tidak saling menimpa hasil rekonsiliasi.
 
 - `failed` boleh di-retry sampai batas attempt; `unknown` tidak pernah otomatis.
 - `succeeded` tidak pernah dikirim ulang meskipun locale lain gagal.

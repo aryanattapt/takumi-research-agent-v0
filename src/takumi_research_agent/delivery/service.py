@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -25,6 +25,7 @@ from takumi_research_agent.persistence.models import (
 
 
 MAX_ATTEMPTS = 3
+STALE_DISPATCH_AFTER = timedelta(minutes=2)
 DELIVERABLE_STATES = ("prepared", "failed", "dispatching")
 ACTION_FOR_DECISION = {"draft": "draft", "publish": "publish"}
 
@@ -63,6 +64,38 @@ class DispatchSummary:
             "unknown": self.unknown,
             "blocked": self.blocked,
         }
+
+
+def pending_delivery_attempt(session, intent_id: str) -> DeliveryAttempt | None:
+    return session.scalar(
+        select(DeliveryAttempt)
+        .where(
+            DeliveryAttempt.intent_id == intent_id,
+            DeliveryAttempt.outcome.in_(("in_flight", "unknown")),
+        )
+        .order_by(DeliveryAttempt.attempt_number.desc())
+        .limit(1)
+    )
+
+
+def delivery_reconciliation_ready(session, intent: DeliveryIntent, *, now: datetime | None = None) -> bool:
+    """Only expose reconciliation after an in-flight request had time to finish."""
+    if intent.state == "unknown":
+        return True
+    if intent.state != "dispatching":
+        return False
+    attempt = pending_delivery_attempt(session, intent.id)
+    if attempt is None:
+        return False
+    if attempt.outcome == "unknown":
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    started = attempt.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc) - started.astimezone(timezone.utc) >= STALE_DISPATCH_AFTER
 
 
 def _digest(value: Any) -> str:
@@ -287,7 +320,13 @@ class DeliveryService:
         ).all()
         for intent in intents:
             if intent.state == "dispatching":
-                if self._finish_unknown(session, intent, reason="stale_dispatching_state"):
+                if not delivery_reconciliation_ready(session, intent):
+                    code = "delivery_attempt_still_in_flight"
+                    self._record_blocked(session, run.id, intent, code)
+                    summary.blocked.append({"unit_key": intent.unit_key, "code": code})
+                    continue
+                attempt = pending_delivery_attempt(session, intent.id)
+                if self._finish_unknown(session, intent, attempt=attempt, reason="stale_dispatching_state"):
                     summary.unknown += 1
                 continue
             capability_block = self._capability_block(blog, intent.action)
@@ -396,10 +435,6 @@ class DeliveryService:
 
     def _finish_succeeded(self, session, intent: DeliveryIntent, *, attempt: DeliveryAttempt, http_status: int | None, remote_id: str | None) -> bool:
         now = datetime.now(timezone.utc)
-        attempt.finished_at = now
-        attempt.outcome = "succeeded"
-        attempt.http_status = http_status
-        attempt.response_summary = {"http_status": http_status, "remote_id": remote_id}
         if not self._transition(
             session,
             intent,
@@ -409,6 +444,10 @@ class DeliveryService:
         ):
             self._record_event(session, intent.run_id, "delivery_finalize_skipped", {"intent_id": intent.id, "unit_key": intent.unit_key, "attempted_state": "succeeded"})
             return False
+        attempt.finished_at = now
+        attempt.outcome = "succeeded"
+        attempt.http_status = http_status
+        attempt.response_summary = {"http_status": http_status, "remote_id": remote_id}
         ledger = self._ledger(session, intent)
         if ledger is not None:
             ledger.local_state = "delivered"
@@ -420,26 +459,26 @@ class DeliveryService:
         return True
 
     def _finish_failed(self, session, intent: DeliveryIntent, *, attempt: DeliveryAttempt | None, http_status: int | None, reason: str) -> bool:
+        if not self._transition(session, intent, state="failed", summary={"http_status": http_status, "error": reason[:300]}):
+            self._record_event(session, intent.run_id, "delivery_finalize_skipped", {"intent_id": intent.id, "unit_key": intent.unit_key, "attempted_state": "failed"})
+            return False
         if attempt is not None:
             attempt.finished_at = datetime.now(timezone.utc)
             attempt.outcome = "failed"
             attempt.http_status = http_status
             attempt.response_summary = {"http_status": http_status, "error": reason[:300]}
-        if not self._transition(session, intent, state="failed", summary={"http_status": http_status, "error": reason[:300]}):
-            self._record_event(session, intent.run_id, "delivery_finalize_skipped", {"intent_id": intent.id, "unit_key": intent.unit_key, "attempted_state": "failed"})
-            return False
         self._record_event(session, intent.run_id, "delivery_failed", {"intent_id": intent.id, "unit_key": intent.unit_key, "http_status": http_status, "error": reason[:200]})
         return True
 
     def _finish_unknown(self, session, intent: DeliveryIntent, *, attempt: DeliveryAttempt | None = None, reason: str) -> bool:
         now = datetime.now(timezone.utc)
-        if attempt is not None:
-            attempt.finished_at = now
-            attempt.outcome = "unknown"
-            attempt.response_summary = {"error": reason[:300]}
         if not self._transition(session, intent, state="unknown", summary={"error": reason[:300], "reconciliation_required": True}):
             self._record_event(session, intent.run_id, "delivery_finalize_skipped", {"intent_id": intent.id, "unit_key": intent.unit_key, "attempted_state": "unknown"})
             return False
+        if attempt is not None:
+            attempt.finished_at = now
+            attempt.outcome = "unknown"
+            attempt.response_summary = {"error": reason[:300], "reconciliation_required": True}
         ledger = self._ledger(session, intent)
         if ledger is not None:
             ledger.local_state = "delivery_unknown"

@@ -828,6 +828,7 @@ delivery_key = hash(blog_id, destination_epoch, article_pair_id, unit_key, actio
 - Payload final disimpan sebelum network call dan tetap sama saat retry intent itu.
 - Header idempotency hanya digunakan jika API memang mendukungnya.
 - Attempt, response, dan remote ID dicatat terpisah dari intent.
+- Intent `dispatching` tidak boleh diambil oleh request delivery kedua ketika attempt masih berada dalam window 2 menit. Setelah window lewat, status masuk `unknown`; status itu tidak pernah dikirim ulang otomatis. Rekonsiliasi dari `dispatching` atau `unknown` memperbarui attempt yang belum selesai beserta intent dan audit event.
 - Jika timeout terjadi setelah POST, lakukan lookup melalui remote ID, idempotency metadata, external key, slug, atau mekanisme yang sudah divalidasi.
 - Jika tidak ada lookup andal dan tidak ada idempotency remote, tahan pada unknown dan minta rekonsiliasi operator melalui dashboard.
 - Local outbox mengurangi duplikasi, tetapi tidak menjamin exactly-once di API eksternal yang tidak menyediakan dukungan.
@@ -982,7 +983,7 @@ Semua milestone mengacu pada kebutuhan BR di bagian 3. Status rencana tidak dian
 - Dukungan draft, jadwal remote, relasi terjemahan, lookup, dan idempotency harus dibuktikan dari API tujuan.
 - Waktu preparation dan resource final ditetapkan berdasarkan benchmark, bukan asumsi bahwa semua riset selesai dalam dua jam.
 
-### 15.4 Status eksekusi (6 November 2026)
+### 15.4 Status eksekusi (10 November 2026)
 
 Status berikut mengacu pada source code dan verifikasi lokal dalam repository. Status “sebagian” berarti deliverable telah dimulai tetapi kriteria keluar milestone belum seluruhnya lulus.
 
@@ -990,7 +991,7 @@ Status berikut mengacu pada source code dan verifikasi lokal dalam repository. S
 | --- | --- | --- | --- |
 | M0 — Risk spike dan eval baseline | Sebagian | Typed tool loop, adapter protokol OpenAI-compatible/Anthropic, budget, browser fallback terisolasi, evidence span, dan policy tests. | Eval adaptasi dengan gold set, fixture loop penuh, dan reconciliation timeout fake blog. |
 | M1 — Fondasi durabel | Sebagian besar | SQLAlchemy schema PostgreSQL, Alembic, auth/CSRF, secret encryption, batas 10 profil, slot unik, worker lease dan fencing, backup/verify/restore dengan manifest artifact ber-hash, laporan recovery, serta import data SQLite legacy yang idempoten ke satu profil. | Fault/recovery test lintas proses (kill worker saat dispatch, lalu restore dan rekonsiliasi). |
-| M2 — Vertical slice persisten | Sebagian | Worker menyambungkan trend, history GET, research tools, penulisan bilingual, critic, policy, dan penyimpanan draft lokal/artifact. | Fixture end-to-end, replay/restart, dan outbox fake blog yang membuktikan retry aman. |
+| M2 — Vertical slice persisten | Sebagian | Worker menyambungkan trend, history GET, research tools, penulisan bilingual, critic, policy, dan penyimpanan draft lokal/artifact; fake blog menguji crash setelah remote accept, menahan dispatch bersamaan, dan merekonsiliasi attempt tanpa mengulang post. | Fixture end-to-end trend-to-article dan replay/restart pipeline penuh. |
 | M3 — Dashboard dan adapter | Sebagian | Dashboard konfigurasi, OpenAI-compatible/Anthropic, jadwal, JSONPath mapping/preview, OpenAPI operation list, dan validasi history read-only. | Capability test write pada sandbox, UI evidence/trace lebih lengkap, dan dukungan kontrak blog nyata. |
 | M4 — Discovery dan history nyata | Sebagian | Sinyal Hacker News Algolia/arXiv dengan scoring heuristik, koleksi cache, Crossref/Europe PMC, dan history adapter berpaginasi. | Connector RSS tambahan, indeks multilingual semantik, backfill/delta, coverage serta recall benchmark. |
 | M5 — Research/editorial qualification | Sebagian | Source metadata, DOAJ journal-policy signal, immutable quote evidence, bilingual writer, critic, sanitasi, dan fail-closed decision. | Eval holdout dan multi-trial, kalibrasi review, pemeriksaan koreksi/retraksi lintas sumber, serta qualification per model. |

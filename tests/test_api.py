@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from takumi_research_agent.api.app import create_app
 from takumi_research_agent.config import Settings
+from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import Base, BlogProfile, GlobalSettings, ProviderProfile
+from takumi_research_agent.persistence.models import Base, BlogProfile, DeliveryAttempt, DeliveryIntent, GlobalSettings, ProviderProfile, Run
 
 
 def test_setup_login_csrf_and_ten_blog_limit():
@@ -186,4 +188,94 @@ def test_recovery_endpoint_reports_artifact_integrity_and_last_restore(tmp_path)
         assert checked.json()["artifacts"]["checked"] is True
         assert checked.json()["artifacts"]["verified"] == 0
         assert body["last_restore"] is None
+    engine.dispose()
+
+
+def test_reconciliation_waits_for_stale_dispatch_and_finalizes_attempt():
+    engine, sessions = create_database("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    settings = replace(Settings.from_env(env_file=None), master_key="test-master-key-" * 4, session_cookie_secure=False)
+    app = create_app(settings, engine=engine, sessions=sessions)
+    started_at = datetime.now(timezone.utc)
+    with sessions.begin() as db:
+        blog = BlogProfile(id="blog-1", name="Test blog", base_url="https://blog.example/api")
+        db.add(blog)
+        db.flush()
+        run = Run(
+            id="run-1",
+            blog_id=blog.id,
+            editorial_date=date(2026, 11, 10),
+            quota_slot_key="slot-1",
+            target_at=started_at + timedelta(hours=1),
+            execution_mode="sandbox",
+            config_snapshot={},
+            status="completed",
+            stage="completed",
+        )
+        db.add(run)
+        db.flush()
+        intent = DeliveryIntent(
+            id="intent-1",
+            run_id=run.id,
+            blog_id=blog.id,
+            pair_id="pair-1",
+            unit_key="article:id",
+            action="draft",
+            operation_id="createPost",
+            destination_epoch=1,
+            delivery_key="d" * 64,
+            approval_fingerprint="a" * 64,
+            payload={"title": "A reviewed title"},
+            state="dispatching",
+        )
+        db.add(intent)
+        db.flush()
+        db.add(DeliveryAttempt(
+            id="attempt-1",
+            intent_id=intent.id,
+            attempt_number=1,
+            started_at=started_at,
+            outcome="in_flight",
+        ))
+
+    with TestClient(app) as client:
+        client.post("/api/v1/setup/admin", json={"username": "admin", "password": "correct-horse-battery-staple"})
+        csrf = client.post("/api/v1/auth/login", json={"username": "admin", "password": "correct-horse-battery-staple"}).json()["csrf_token"]
+        detail = client.get("/api/v1/runs/run-1").json()
+        assert detail["deliveries"][0]["reconciliation_ready"] is False
+
+        early = client.post(
+            "/api/v1/runs/run-1/delivery/intent-1/reconcile",
+            headers={"X-CSRF-Token": csrf},
+            json={"outcome": "succeeded", "remote_id": "remote-1"},
+        )
+        assert early.status_code == 409
+        with sessions() as db:
+            assert db.get(DeliveryIntent, "intent-1").state == "dispatching"
+            assert db.get(DeliveryAttempt, "attempt-1").outcome == "in_flight"
+
+        with sessions.begin() as db:
+            db.get(DeliveryAttempt, "attempt-1").started_at = datetime.now(timezone.utc) - STALE_DISPATCH_AFTER - timedelta(seconds=1)
+        detail = client.get("/api/v1/runs/run-1").json()
+        assert detail["deliveries"][0]["reconciliation_ready"] is True
+        resolved = client.post(
+            "/api/v1/runs/run-1/delivery/intent-1/reconcile",
+            headers={"X-CSRF-Token": csrf},
+            json={"outcome": "succeeded", "remote_id": "remote-1", "note": "Confirmed in blog history"},
+        )
+        assert resolved.status_code == 200, resolved.text
+        duplicate = client.post(
+            "/api/v1/runs/run-1/delivery/intent-1/reconcile",
+            headers={"X-CSRF-Token": csrf},
+            json={"outcome": "failed", "note": "Conflicting second reconciliation"},
+        )
+        assert duplicate.status_code == 409
+
+    with sessions() as db:
+        intent = db.get(DeliveryIntent, "intent-1")
+        attempt = db.get(DeliveryAttempt, "attempt-1")
+        assert intent.state == "succeeded" and intent.remote_id == "remote-1"
+        assert attempt.outcome == "succeeded" and attempt.finished_at is not None
+        assert attempt.response_summary["reconciled"] is True
+        assert attempt.response_summary["note"] == "Confirmed in blog history"
     engine.dispose()

@@ -45,7 +45,7 @@ Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data
 4. Aktifkan profil setelah riwayat blog tervalidasi. Aktivasi belum mengizinkan mutasi atau publish.
 5. Gunakan tombol Jalankan dry-run untuk memulai riset lebih awal. Tombol ini mengakses provider model dan sumber eksternal, tetapi tidak menulis ke API blog.
 6. Untuk mengaktifkan delivery, pilih operasi POST/PUT create, lalu jalankan Uji sandbox create. Uji ini mengirim **satu draft nyata** ke blog dan harus dipakai pada endpoint sandbox; hasilnya membuktikan create tunggal, bukan publish, idempotency, atau lookup.
-7. Jalankan sandbox run untuk menyiapkan intent delivery, lalu buka Run history dan konfirmasi Kirim ke blog. Dry-run tidak pernah mengirim request. Jika hasil sebuah intent `unknown`, gunakan tombol Sukses/Gagal untuk rekonsiliasi; keputusan itu tercatat sebagai event audit, bukan intent baru.
+7. Jalankan sandbox run untuk menyiapkan intent delivery, lalu buka Run history dan konfirmasi Kirim ke blog. Dry-run tidak pernah mengirim request. Jika intent `unknown` atau `dispatching` lebih dari dua menit, periksa riwayat blog sebelum memilih Sukses/Gagal; menandai gagal akan membuka intent untuk retry dan bisa membuat duplikat bila post sebenarnya sudah ada.
 8. Buka Run history untuk melihat keputusan, hasil review, artikel Indonesia/English, dan status outbox delivery.
 
 Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset.
@@ -141,7 +141,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Test menguji agent runtime, mapping/pagination blog, policy editorial, outbox delivery, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime, mapping/pagination blog, policy editorial, crash setelah blog menerima post, outbox delivery/reconciliation, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 

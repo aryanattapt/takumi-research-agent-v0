@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
 import pytest
 
-from takumi_research_agent.blogs.adapter import BlogCapabilities, DeliveryOutcomeUnknown
+from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
 from takumi_research_agent.blogs.contracts import BlogMapping
-from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
+from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER, DeliveryBlocked, DeliveryService
 from takumi_research_agent.persistence.database import create_database
 from takumi_research_agent.persistence.models import (
     ArticlePairRecord,
@@ -15,6 +17,7 @@ from takumi_research_agent.persistence.models import (
     Base,
     BlogProfile,
     ContentLedger,
+    DeliveryAttempt,
     DeliveryIntent,
     GlobalSettings,
     Run,
@@ -47,8 +50,8 @@ class FakeAdapter:
         return {"http_status": 201, "body": {"post": {"id": f"remote-{len(self.calls)}"}}}
 
 
-def _environment(*, execution_mode: str = "sandbox", create_draft: bool = True):
-    engine, sessions = create_database("sqlite:///:memory:")
+def _environment(*, execution_mode: str = "sandbox", create_draft: bool = True, database_url: str = "sqlite:///:memory:"):
+    engine, sessions = create_database(database_url)
     Base.metadata.create_all(engine)
     now = datetime.now(timezone.utc)
     with sessions.begin() as session:
@@ -273,3 +276,108 @@ async def test_unproven_draft_capability_keeps_the_intent_local():
     assert adapter.calls == []
     assert {item["code"] for item in summary["blocked"]} == {"create_draft_capability_unproven"}
     assert {intent.state for intent in _intents(sessions)} == {"prepared"}
+
+
+@pytest.mark.asyncio
+async def test_recent_dispatching_intent_is_left_in_flight_for_a_concurrent_worker():
+    sessions = _environment()
+    service = DeliveryService()
+    with sessions.begin() as session:
+        intents = service.prepare(session, run_id="run-1")
+        now = datetime.now(timezone.utc)
+        for intent in intents:
+            intent.state = "dispatching"
+            session.add(DeliveryAttempt(
+                intent_id=intent.id,
+                attempt_number=1,
+                started_at=now - STALE_DISPATCH_AFTER + timedelta(seconds=30),
+                outcome="in_flight",
+            ))
+    adapter = FakeAdapter(BlogMapping.model_validate(MAPPING))
+
+    with sessions() as session:
+        summary = await service.dispatch(session, run_id="run-1", adapter=adapter)
+
+    assert adapter.calls == []
+    assert {item["code"] for item in summary["blocked"]} == {"delivery_attempt_still_in_flight"}
+    assert {intent.state for intent in _intents(sessions)} == {"dispatching"}
+    with sessions() as session:
+        assert {attempt.outcome for attempt in session.query(DeliveryAttempt).all()} == {"in_flight"}
+
+
+@pytest.mark.asyncio
+async def test_restart_after_remote_acceptance_never_reposts_success_or_unknown_intent(tmp_path):
+    database_url = "sqlite:///" + str(tmp_path / "delivery-recovery.sqlite3")
+    sessions = _environment(database_url=database_url)
+    service = DeliveryService()
+    with sessions.begin() as session:
+        service.prepare(session, run_id="run-1")
+
+    remote_posts: list[dict] = []
+
+    def fake_blog(request: httpx.Request):
+        payload = json.loads(request.content)
+        remote_id = f"remote-{len(remote_posts) + 1}"
+        remote_posts.append({"payload": payload, "idempotency_key": request.headers.get("Idempotency-Key"), "remote_id": remote_id})
+        return httpx.Response(201, json={"post": {"id": remote_id}})
+
+    real_adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="sandbox-token",
+        mapping=BlogMapping.model_validate(MAPPING),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        create_operation=type("Op", (), {"method": "post", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True, create_draft=True, idempotency_key=True),
+        transport=httpx.MockTransport(fake_blog),
+    )
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    class CrashAfterRemoteAccept:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_payload(self, payload, *, intent_key, publish):
+            result = await real_adapter.send_payload(payload, intent_key=intent_key, publish=publish)
+            self.calls += 1
+            if payload["article"]["language"] == "id":
+                raise SimulatedProcessCrash("worker terminated after the blog accepted the request")
+            return result
+
+    try:
+        with pytest.raises(SimulatedProcessCrash):
+            with sessions() as session:
+                await service.dispatch(session, run_id="run-1", adapter=CrashAfterRemoteAccept())
+
+        assert [post["payload"]["article"]["language"] for post in remote_posts] == ["en", "id"]
+        assert len({post["idempotency_key"] for post in remote_posts}) == 2
+
+        # The process is gone; only durable intent/attempt rows remain for the new dispatcher.
+        with sessions.begin() as session:
+            interrupted = session.query(DeliveryIntent).filter_by(unit_key="article:id").one()
+            assert interrupted.state == "dispatching"
+            attempt = session.query(DeliveryAttempt).filter_by(intent_id=interrupted.id).one()
+            attempt.started_at = datetime.now(timezone.utc) - STALE_DISPATCH_AFTER - timedelta(seconds=1)
+
+        restarted_service = DeliveryService()
+        with sessions() as session:
+            resumed = await restarted_service.dispatch(session, run_id="run-1", adapter=real_adapter)
+        assert resumed["unknown"] == 1
+        assert len(remote_posts) == 2
+
+        with sessions() as session:
+            states = {intent.unit_key: intent.state for intent in session.query(DeliveryIntent).all()}
+            attempts = {
+                intent.unit_key: session.query(DeliveryAttempt).filter_by(intent_id=intent.id).one().outcome
+                for intent in session.query(DeliveryIntent).all()
+            }
+        assert states == {"article:en": "succeeded", "article:id": "unknown"}
+        assert attempts == {"article:en": "succeeded", "article:id": "unknown"}
+
+        with sessions() as session:
+            retried = await restarted_service.dispatch(session, run_id="run-1", adapter=real_adapter)
+        assert retried["succeeded"] == 0 and retried["unknown"] == 0
+        assert len(remote_posts) == 2
+    finally:
+        await real_adapter.close()
