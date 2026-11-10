@@ -22,7 +22,8 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
 | Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
 | Import data SQLite legacy | Tersedia lewat CLI `takumi import-sqlite`: satu file lama dipetakan ke satu blog profile yang nonaktif, idempoten, dan menyimpan laporan migrasi |
-| Evaluasi kualitas model | Baseline runtime deterministik v1 tersedia di CI; qualification mutu riset per model belum selesai |
+| Evaluasi kualitas riset/model | CLI run-research, blind review packet, merge hasil reviewer, dan qualification gate tersedia; dataset berlabel dan hasil provider nyata belum tersedia |
+| Evaluasi retrieval/dedup | Runner untuk baseline lexical Jaccard dan metrik retrieval/ranking/dedup tersedia; indeks semantik multilingual dan benchmark berlabel belum tersedia |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -37,6 +38,8 @@ Headless browser lokal menghindari langganan search API berbayar untuk pengambil
 4. Buka http://localhost:8000, buat akun administrator, lalu konfigurasi provider dan blog.
 
 Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data database serta artifact sumber berada pada Docker volumes. Backup dan restore produksi belum dilengkapi runbook otomatis.
+
+Runbook evaluasi, deployment, backup, dan recovery ada di [docs/operations/release-and-recovery-runbook.md](docs/operations/release-and-recovery-runbook.md). Runbook belum menjadi bukti bahwa deployment atau restore live sudah diuji.
 
 ### Konfigurasi pertama
 
