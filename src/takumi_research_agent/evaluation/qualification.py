@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 FIELDS = {"technology", "physics", "chemistry", "biology"}
+DECISIONS = {"pass", "fail", "uncertain"}
 TRIAL_METADATA = (
     "provider",
     "model",
@@ -36,7 +37,7 @@ TRIAL_METRICS = (
 def read_json(path: str | Path) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("Evaluation input must be a JSON object")
+        raise TypeError("Evaluation input must be a JSON object")
     return value
 
 
@@ -315,13 +316,22 @@ def calibrate_reviewers(
     """Report reviewer agreement against independent adjudicated labels."""
     grouped: dict[str, dict[str, str]] = defaultdict(dict)
     errors: list[str] = []
+    valid_adjudications: dict[str, str] = {}
+    for case_id, decision in adjudicated_cases.items():
+        if not isinstance(case_id, str) or not case_id.strip() or not isinstance(decision, str) or decision not in DECISIONS:
+            errors.append("adjudicated cases need non-empty IDs and pass/fail/uncertain decisions")
+            continue
+        valid_adjudications[case_id] = decision
     for index, item in enumerate(labels):
         if not isinstance(item, dict):
             errors.append(f"labels[{index}] must be an object")
             continue
         case_id, reviewer, decision = item.get("case_id"), item.get("reviewer_id"), item.get("decision")
-        if case_id not in adjudicated_cases or not isinstance(reviewer, str) or not reviewer.strip() or not isinstance(decision, str) or not decision.strip():
+        if not isinstance(case_id, str) or case_id not in valid_adjudications or not isinstance(reviewer, str) or not reviewer.strip() or not isinstance(decision, str) or not decision.strip():
             errors.append(f"labels[{index}] has an unknown case or missing reviewer/decision")
+            continue
+        if decision not in DECISIONS:
+            errors.append(f"labels[{index}].decision must be pass, fail, or uncertain")
             continue
         if case_id in grouped[reviewer]:
             errors.append(f"reviewer {reviewer!r} labeled case {case_id!r} more than once")
@@ -329,8 +339,8 @@ def calibrate_reviewers(
         grouped[reviewer][case_id] = decision
     reviewers = {}
     for reviewer, results in sorted(grouped.items()):
-        common = sorted(set(results) & set(adjudicated_cases))
-        gold = [adjudicated_cases[case_id] for case_id in common]
+        common = sorted(set(results) & set(valid_adjudications))
+        gold = [valid_adjudications[case_id] for case_id in common]
         judged = [results[case_id] for case_id in common]
         correct = sum(left == right for left, right in zip(gold, judged))
         reviewers[reviewer] = {
