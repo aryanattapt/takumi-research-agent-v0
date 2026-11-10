@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "dataset_version": "research-holdout-v1.0.0",
+  "description": "Template only. Add independently source-checked and human-adjudicated cases before qualification.",
+  "cases": []
+}

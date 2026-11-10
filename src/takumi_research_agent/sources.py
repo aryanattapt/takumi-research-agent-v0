@@ -74,6 +74,51 @@ def _published_date(parts: list[list[int]] | None) -> tuple[str, str]:
     return formatted, precision
 
 
+def _crossref_status_alerts(item: dict[str, Any]) -> list[str]:
+    relation = item.get("relation", {})
+    signals = ("retract", "correct", "corrig", "errat", "update", "withdraw", "comment")
+    alerts: list[str] = []
+    if isinstance(relation, dict):
+        for relation_type, targets in relation.items():
+            relation_name = str(relation_type).casefold()
+            if not any(signal in relation_name for signal in signals):
+                continue
+            target_list = targets if isinstance(targets, list) else [targets]
+            for target in target_list:
+                target_id = target.get("id") or target.get("DOI") if isinstance(target, dict) else target
+                suffix = f" ({target_id})" if isinstance(target_id, str) and target_id else ""
+                alerts.append(f"Crossref relation {relation_type}{suffix}")
+    updates = item.get("update-to", [])
+    update_list = updates if isinstance(updates, list) else [updates]
+    for update in update_list:
+        if not isinstance(update, dict):
+            continue
+        update_type = str(update.get("type") or update.get("update-type") or "update").strip()
+        target_id = update.get("DOI") or update.get("doi") or update.get("id")
+        suffix = f" ({target_id})" if isinstance(target_id, str) and target_id else ""
+        alerts.append(f"Crossref update-to {update_type}{suffix}")
+    return alerts[:20]
+
+
+def _europe_pmc_status_alerts(item: dict[str, Any]) -> list[str]:
+    alerts: list[str] = []
+    if item.get("isRetracted") is True:
+        alerts.append("Europe PMC marks this record as retracted")
+    for key in ("commentCorrectionList", "correctionDetails", "correction", "erratum", "updateTo", "isCorrectedBy"):
+        value = item.get(key)
+        if value in (None, False, "", [], {}):
+            continue
+        values = value if isinstance(value, list) else [value]
+        for entry in values:
+            detail = ""
+            if isinstance(entry, dict):
+                detail = str(entry.get("id") or entry.get("doi") or entry.get("type") or "").strip()
+            elif isinstance(entry, str):
+                detail = entry.strip()
+            alerts.append(f"Europe PMC {key}" + (f": {detail[:180]}" if detail else " reports an update/correction signal"))
+    return alerts[:20]
+
+
 def _crossref_record(item: dict[str, Any]) -> dict[str, Any] | None:
     doi = normalize_doi(str(item.get("DOI", "")))
     title = next(iter(item.get("title", [])), "").strip()
@@ -102,10 +147,8 @@ def _crossref_record(item: dict[str, Any]) -> dict[str, Any] | None:
         "source": "crossref",
         "review_status": "unknown",
         "review_evidence": [],
-        "retracted": any(
-            "retract" in f"{key} {value}".lower()
-            for key, value in item.get("relation", {}).items()
-        ),
+        "retracted": any("retract" in alert.casefold() for alert in _crossref_status_alerts(item)),
+        "status_alerts": _crossref_status_alerts(item),
         "crossref_updated": item.get("updated", {}).get("date-time", ""),
     }
 
@@ -140,6 +183,7 @@ def _europe_pmc_record(item: dict[str, Any]) -> dict[str, Any] | None:
         "review_status": "unknown",
         "review_evidence": [],
         "retracted": bool(item.get("isRetracted", False)),
+        "status_alerts": _europe_pmc_status_alerts(item),
     }
 
 
@@ -208,6 +252,8 @@ class LiteratureSources:
                         previous["publication_date"] = record["publication_date"]
                         previous["date_precision"] = record["date_precision"]
                     previous["source"] = "crossref+europe-pmc"
+                    previous["retracted"] = bool(previous.get("retracted")) or bool(record.get("retracted"))
+                    previous["status_alerts"] = list(dict.fromkeys(previous.get("status_alerts", []) + record.get("status_alerts", [])))[:20]
                     found[record["doi"]] = previous
                 else:
                     found[record["doi"]] = record
@@ -257,12 +303,21 @@ class LiteratureSources:
         if paper.get("type") != "journal-article":
             reasons.append("Source metadata does not identify this item as a journal article.")
         if paper.get("retracted"):
-            reasons.append("Crossref reports a retraction relation.")
-        if reasons:
+            reasons.append("At least one metadata source reports a retraction signal.")
+        status_alerts = list(dict.fromkeys(str(value) for value in paper.get("status_alerts", []) if value))
+        correction_alerts = [alert for alert in status_alerts if not any(token in alert.casefold() for token in ("retract", "withdraw"))]
+        if paper.get("retracted"):
             paper["review_status"] = "rejected"
             paper["review_reason"] = reasons
             self._save_paper(doi, paper)
-            return {"status": "rejected", "reasons": reasons, "doi": doi}
+            return {"status": "rejected", "reasons": reasons, "alerts": status_alerts, "doi": doi}
+        if correction_alerts:
+            reasons.extend(correction_alerts)
+            reasons.append("Inspect the linked correction/update and verify which version supports the claim before using this source.")
+            paper["review_status"] = "review_required"
+            paper["review_reason"] = reasons
+            self._save_paper(doi, paper)
+            return {"status": "review_required", "reasons": reasons, "alerts": status_alerts, "doi": doi}
 
         review_evidence = []
         try:
@@ -311,4 +366,4 @@ class LiteratureSources:
         paper["review_evidence"] = review_evidence
         paper["review_reason"] = reasons or ["Exact DOI and venue ISSN matched a DOAJ-listed journal; journal-level peer-review policy was found, but this check does not prove article-specific peer-review handling."]
         self._save_paper(doi, paper)
-        return {"status": status, "doi": doi, "venue": paper.get("venue"), "evidence": review_evidence, "reasons": paper["review_reason"]}
+        return {"status": status, "doi": doi, "venue": paper.get("venue"), "evidence": review_evidence, "alerts": status_alerts, "reasons": paper["review_reason"]}

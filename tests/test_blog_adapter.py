@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -159,6 +160,36 @@ async def test_history_checkpoint_is_rejected_after_mapping_changes():
     finally:
         await adapter.close()
         await changed_adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("time_format", "expected"),
+    [("iso8601", "2026-11-10T05:00:00Z"), ("unix_seconds", "1794286800")],
+)
+async def test_history_delta_sends_normalized_watermark(time_format, expected):
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request):
+        seen["modified_after"] = request.url.params.get("modified_after")
+        return httpx.Response(200, json={"data": {"items": []}})
+
+    adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=mapping(delta_since_parameter="modified_after", delta_time_format=time_format),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        batch = await adapter.read_history_batch(
+            modified_since=datetime(2026, 11, 10, 12, 0, tzinfo=timezone(timedelta(hours=7)))
+        )
+    finally:
+        await adapter.close()
+    assert batch.complete
+    assert seen["modified_after"] == expected
 
 
 @pytest.mark.asyncio

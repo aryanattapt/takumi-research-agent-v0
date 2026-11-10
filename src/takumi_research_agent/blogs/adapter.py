@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit
 
@@ -198,12 +199,15 @@ class BlogApiAdapter:
         *,
         checkpoint: HistoryCheckpoint | dict[str, Any] | None = None,
         max_pages: int = 1,
+        modified_since: datetime | None = None,
     ) -> HistoryBatch:
         """Read bounded pages; the private checkpoint lets a caller resume after persisting a batch."""
         if not self.capabilities.list_posts:
             raise ContractError("Blog adapter has not passed the list capability check")
         if type(max_pages) is not int or not 1 <= max_pages <= self.mapping.page_limit:
             raise ContractError("History batch page count is outside the configured limit")
+        if modified_since is not None and not self.mapping.delta_since_parameter:
+            raise ContractError("A modified-since value requires a configured delta-since request parameter")
         mapping_hash = self.history_mapping_hash
         if checkpoint is None:
             state = HistoryCheckpoint(self.mapping.pagination_mode, mapping_hash)
@@ -225,6 +229,12 @@ class BlogApiAdapter:
             if current.pages_completed >= self.mapping.page_limit:
                 raise ContractError("Configured pagination limit reached; history is incomplete")
             params: dict[str, Any] = {}
+            if modified_since is not None:
+                delta_since = modified_since.replace(tzinfo=timezone.utc) if modified_since.tzinfo is None else modified_since.astimezone(timezone.utc)
+                if self.mapping.delta_time_format == "unix_seconds":
+                    params[self.mapping.delta_since_parameter] = int(delta_since.timestamp())
+                else:
+                    params[self.mapping.delta_since_parameter] = delta_since.isoformat().replace("+00:00", "Z")
             if self.mapping.pagination_mode == "page":
                 if not self.mapping.page_request_parameter:
                     raise ContractError("Page pagination requires a request parameter")

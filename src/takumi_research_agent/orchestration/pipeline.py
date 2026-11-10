@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from takumi_research_agent.agent.runtime import RequestBudget
 from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities
 from takumi_research_agent.blogs.contracts import BlogMapping, Operation
-from takumi_research_agent.config import Settings
+from takumi_research_agent.config import RSSFeedConfig, Settings
 from takumi_research_agent.delivery.service import DeliveryBlocked, DeliveryService
 from takumi_research_agent.discovery.trends import TrendCandidate, TrendCollector
 from takumi_research_agent.domain.policy import editorial_decision
@@ -53,6 +53,12 @@ class PipelineBlocked(RuntimeError):
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 class DailyResearchProcessor:
@@ -124,6 +130,7 @@ class DailyResearchProcessor:
                 "adapter": adapter,
                 "topic_settings": dict(blog.topic_settings),
                 "editorial_settings": dict(blog.editorial_settings),
+                "rss_feeds": list(blog.rss_feeds or []),
                 "capability_result": dict(blog.capability_result),
             }
 
@@ -306,38 +313,69 @@ class DailyResearchProcessor:
         with self.sessions.begin() as session:
             state = session.get(BlogHistorySyncState, blog_id)
             if state is not None and state.sync_run_id == run_id and state.mapping_hash == mapping_hash and state.complete:
+                query = select(BlogHistory).where(BlogHistory.blog_id == blog_id)
+                if state.sync_mode != "delta":
+                    query = query.where(BlogHistory.snapshot_id == state.snapshot_id)
                 return [
                     row.canonical_record
-                    for row in session.scalars(
-                        select(BlogHistory).where(BlogHistory.blog_id == blog_id, BlogHistory.snapshot_id == state.snapshot_id)
-                    ).all()
+                    for row in session.scalars(query).all()
                 ]
-            if state is None:
-                state = BlogHistorySyncState(
-                    blog_id=blog_id,
-                    sync_run_id=run_id,
-                    mapping_hash=mapping_hash,
-                    snapshot_id=snapshot_id,
-                    checkpoint=None,
-                    complete=False,
-                    records_synced=0,
-                    started_at=datetime.now(timezone.utc),
+            same_mapping = state is not None and state.mapping_hash == mapping_hash
+            same_sync = same_mapping and state.sync_run_id == run_id
+            if not same_sync:
+                previous_watermark = _as_utc(state.committed_watermark) if same_mapping and state else None
+                adapter_mapping = getattr(adapter, "mapping", None)
+                delta_parameter = getattr(adapter_mapping, "delta_since_parameter", None)
+                overlap_seconds = getattr(adapter_mapping, "delta_overlap_seconds", 300)
+                sync_mode = "delta" if previous_watermark is not None and delta_parameter else "full"
+                sync_since = (
+                    previous_watermark - timedelta(seconds=overlap_seconds)
+                    if sync_mode == "delta" and previous_watermark is not None
+                    else None
                 )
-                session.add(state)
-            elif state.sync_run_id != run_id or state.mapping_hash != mapping_hash:
-                state.sync_run_id = run_id
-                state.mapping_hash = mapping_hash
-                state.snapshot_id = snapshot_id
-                state.checkpoint = None
-                state.complete = False
-                state.records_synced = 0
-                state.started_at = datetime.now(timezone.utc)
-                state.completed_at = None
+                sync_started_at = datetime.now(timezone.utc)
+                if state is None:
+                    state = BlogHistorySyncState(
+                        blog_id=blog_id,
+                        sync_run_id=run_id,
+                        mapping_hash=mapping_hash,
+                        snapshot_id=snapshot_id,
+                        sync_mode=sync_mode,
+                        sync_since=sync_since,
+                        committed_watermark=None,
+                        checkpoint=None,
+                        complete=False,
+                        records_synced=0,
+                        started_at=sync_started_at,
+                    )
+                    session.add(state)
+                else:
+                    state.sync_run_id = run_id
+                    state.mapping_hash = mapping_hash
+                    state.snapshot_id = snapshot_id
+                    state.sync_mode = sync_mode
+                    state.sync_since = sync_since
+                    state.committed_watermark = previous_watermark
+                    state.checkpoint = None
+                    state.complete = False
+                    state.records_synced = 0
+                    state.started_at = sync_started_at
+                    state.completed_at = None
+            if state is None:
+                raise PipelineBlocked("history_sync_state_unavailable")
             snapshot_id = state.snapshot_id
+            sync_mode = state.sync_mode
+            sync_since = _as_utc(state.sync_since)
+            sync_started_at = _as_utc(state.started_at)
+            if sync_started_at is None:
+                raise PipelineBlocked("history_sync_start_time_missing")
             checkpoint = self._decode_history_checkpoint(state.checkpoint)
 
         while True:
-            batch = await adapter.read_history_batch(checkpoint=checkpoint, max_pages=1)
+            batch_request: dict[str, Any] = {"checkpoint": checkpoint, "max_pages": 1}
+            if sync_mode == "delta":
+                batch_request["modified_since"] = sync_since
+            batch = await adapter.read_history_batch(**batch_request)
             if batch.pages_read < 1:
                 raise PipelineBlocked("history_batch_made_no_progress")
             if batch.complete == (batch.checkpoint is not None):
@@ -358,22 +396,19 @@ class DailyResearchProcessor:
                 ) or 0
                 if batch.complete:
                     state.completed_at = datetime.now(timezone.utc)
-                    for old in session.scalars(
-                        select(BlogHistory).where(
-                            BlogHistory.blog_id == blog_id,
-                            BlogHistory.snapshot_id != snapshot_id,
-                        )
-                    ).all():
-                        session.delete(old)
-                    completed_history = [
-                        row.canonical_record
-                        for row in session.scalars(
+                    state.committed_watermark = sync_started_at
+                    if sync_mode == "full":
+                        for old in session.scalars(
                             select(BlogHistory).where(
                                 BlogHistory.blog_id == blog_id,
-                                BlogHistory.snapshot_id == snapshot_id,
+                                BlogHistory.snapshot_id != snapshot_id,
                             )
-                        ).all()
-                    ]
+                        ).all():
+                            session.delete(old)
+                    query = select(BlogHistory).where(BlogHistory.blog_id == blog_id)
+                    if sync_mode == "full":
+                        query = query.where(BlogHistory.snapshot_id == snapshot_id)
+                    completed_history = [row.canonical_record for row in session.scalars(query).all()]
             if batch.complete:
                 return completed_history or []
             checkpoint = batch.checkpoint.to_dict()
@@ -506,8 +541,14 @@ class DailyResearchProcessor:
         budget = RequestBudget(max_requests=20, max_tool_actions=40)
         try:
             history = await self._sync_history_resumable(run.blog_id, run.id, adapter)
-            candidates = await self.trends.collect()
-            self._record_discovery_coverage(run.id, getattr(self.trends, "last_coverage", {}))
+            profile_feeds = tuple(RSSFeedConfig(**feed) for feed in runtime.get("rss_feeds", []))
+            if profile_feeds:
+                coverage: dict[str, Any] = {}
+                candidates = await self.trends.collect(rss_feeds=profile_feeds, coverage_sink=coverage)
+            else:
+                candidates = await self.trends.collect()
+                coverage = getattr(self.trends, "last_coverage", {})
+            self._record_discovery_coverage(run.id, coverage)
             self._record_trends(candidates)
             now = datetime.now(timezone.utc)
             enabled_fields = {field for field, enabled in runtime["topic_settings"].items() if enabled}

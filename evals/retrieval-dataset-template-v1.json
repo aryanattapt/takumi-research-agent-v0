@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "dataset_version": "history-retrieval-v1.0.0",
+  "description": "Template only. Add independently labeled holdout cases and immutable corpus/source snapshots.",
+  "cases": []
+}

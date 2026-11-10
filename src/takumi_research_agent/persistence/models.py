@@ -73,6 +73,7 @@ class BlogProfile(Base):
     adapter_mapping: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     capability_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    rss_feeds: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     validated_revision: Mapped[int | None] = mapped_column(Integer)
     topic_settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -123,13 +124,16 @@ class BlogHistory(Base):
 
 
 class BlogHistorySyncState(Base):
-    """Durable continuation state for one exhaustive blog-history snapshot."""
+    """Durable continuation and watermark state for one blog-history sync."""
 
     __tablename__ = "blog_history_sync_states"
     blog_id: Mapped[str] = mapped_column(ForeignKey("blog_profiles.id", ondelete="CASCADE"), primary_key=True)
     sync_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
     mapping_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sync_mode: Mapped[str] = mapped_column(String(20), default="full", nullable=False)
+    sync_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committed_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     records_synced: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

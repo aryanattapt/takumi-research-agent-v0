@@ -37,6 +37,9 @@ class BlogMapping(BaseModel):
     page_size_parameter: str | None = None
     page_size: int = Field(default=100, ge=1, le=1_000)
     page_limit: int = Field(default=1, ge=1, le=100)
+    delta_since_parameter: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,120}$")
+    delta_time_format: Literal["iso8601", "unix_seconds"] = "iso8601"
+    delta_overlap_seconds: int = Field(default=300, ge=0, le=604_800)
     response_fields_required: set[str] = Field(default_factory=lambda: {"id", "title"})
 
     @field_validator("list_path", "page_next_path")
@@ -61,6 +64,8 @@ class BlogMapping(BaseModel):
             raise ValueError("Page and offset pagination require page and page-size request parameters")
         if self.page_next_path and self.pagination_mode != "cursor":
             raise ValueError("page_next_path is only valid with cursor pagination")
+        if self.delta_since_parameter and self.delta_since_parameter in {self.page_request_parameter, self.page_size_parameter}:
+            raise ValueError("Delta-since parameter must be distinct from pagination parameters")
         return self
 
 

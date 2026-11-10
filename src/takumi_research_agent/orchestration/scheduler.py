@@ -38,6 +38,7 @@ def _snapshot(blog: BlogProfile, provider: ProviderProfile | None) -> dict:
         "capabilities": blog.capabilities,
         "topic_settings": blog.topic_settings,
         "editorial_settings": blog.editorial_settings,
+        "rss_feeds": blog.rss_feeds,
         "schedule_timezone": blog.schedule_timezone,
         "publish_time": blog.publish_time,
         "lead_minutes": blog.lead_minutes,

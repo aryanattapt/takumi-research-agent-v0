@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -31,6 +32,20 @@ class ProviderRequest(StrictRequest):
     expected_revision: int | None = Field(default=None, ge=1)
 
 
+class RSSFeedRequest(StrictRequest):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=8, max_length=2_000)
+    field: Literal["technology", "physics", "chemistry", "biology"]
+
+    @field_validator("url")
+    @classmethod
+    def validate_feed_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("RSS feed URL must be absolute HTTPS without credentials or fragment")
+        return value
+
+
 class BlogRequest(StrictRequest):
     name: str = Field(min_length=2, max_length=160)
     base_url: str = Field(min_length=8, max_length=1_000)
@@ -43,6 +58,7 @@ class BlogRequest(StrictRequest):
     capabilities: dict[str, Any] = Field(default_factory=dict)
     topic_settings: dict[str, Any] = Field(default_factory=lambda: {"technology": True, "physics": True, "chemistry": True, "biology": True})
     editorial_settings: dict[str, Any] = Field(default_factory=dict)
+    rss_feeds: list[RSSFeedRequest] = Field(default_factory=list, max_length=50)
     schedule_enabled: bool = False
     schedule_timezone: str = Field(default="Asia/Jakarta", min_length=3, max_length=100)
     publish_time: str = Field(default="06:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -76,6 +92,21 @@ class BlogRequest(StrictRequest):
             from takumi_research_agent.blogs.contracts import BlogMapping
 
             BlogMapping.model_validate(value)
+        return value
+
+    @field_validator("rss_feeds")
+    @classmethod
+    def validate_rss_feeds(cls, value: list[RSSFeedRequest]) -> list[RSSFeedRequest]:
+        names: set[str] = set()
+        urls: set[str] = set()
+        for feed in value:
+            parsed = urlsplit(feed.url)
+            normalized_url = f"{parsed.scheme}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}?{parsed.query}"
+            name = feed.name.strip().casefold()
+            if name in names or normalized_url in urls:
+                raise ValueError("RSS feed names and URLs must be unique per profile")
+            names.add(name)
+            urls.add(normalized_url)
         return value
 
 

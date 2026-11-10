@@ -13,7 +13,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Maksimal 10 blog dan dashboard konfigurasi | Tersedia |
 | Provider OpenAI-compatible dan Anthropic | Adapter tersedia; kredensial/model perlu dikonfigurasi dan di-probe |
 | Jadwal harian default pukul 06:00 Asia/Jakarta | Worker dan slot harian tersedia; mulai menyiapkan 120 menit sebelumnya, dan admission control menandai slot `at_risk`/`infeasible` bila antrean tidak muat sebelum target |
-| Sinyal tren teknologi dan sains | Hacker News Algolia, arXiv, dan RSS publik terkonfigurasi dengan skor heuristik yang transparan |
+| Sinyal tren teknologi dan sains | Hacker News Algolia, arXiv, dan RSS publik global atau per profil dengan skor heuristik yang transparan |
 | Riwayat dan mapping JSON blog | GET read-only, OpenAPI operation list, JSONPath terbatas, preview dan pagination |
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
@@ -49,7 +49,7 @@ Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data
 7. Jalankan sandbox run untuk menyiapkan intent delivery, lalu buka Run history dan konfirmasi Kirim ke blog. Dry-run tidak pernah mengirim request. Jika intent `unknown` atau `dispatching` lebih dari dua menit, periksa riwayat blog sebelum memilih Sukses/Gagal; menandai gagal akan membuka intent untuk retry dan bisa membuat duplikat bila post sebenarnya sudah ada.
 8. Buka Run history untuk melihat keputusan, hasil review, artikel Indonesia/English, dan status outbox delivery.
 
-Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset. Feed RSS opsional dikonfigurasi secara global lewat `TREND_RSS_FEEDS` sebagai JSON array berisi `name`, `url`, dan `field` (`technology`, `physics`, `chemistry`, atau `biology`); setiap host feed harus ditambahkan ke `RESEARCH_ALLOWED_DOMAINS`. Hanya HTTPS yang diterima. Feed diambil dengan batas 2 MB, cache kondisional ETag/Last-Modified, dan kegagalannya terlihat pada Coverage discovery di detail Run. Pengaturan feed terpisah per profil blog belum tersedia.
+Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset. Feed RSS dapat dikonfigurasi global lewat `TREND_RSS_FEEDS` atau khusus per profil blog melalui editor profil sebagai array JSON `{ "name", "url", "field" }`; daftar khusus profil menggantikan feed global untuk profil tersebut, sedangkan daftar kosong memakai konfigurasi global. Field yang didukung: `technology`, `physics`, `chemistry`, atau `biology`. Setiap host feed harus ditambahkan ke `RESEARCH_ALLOWED_DOMAINS`; hanya HTTPS yang diterima. Feed diambil dengan batas 2 MB, cache kondisional ETag/Last-Modified, dan kegagalannya terlihat pada Coverage discovery di detail Run. Konfigurasi feed ikut dibekukan dalam snapshot run.
 
 ### Kapasitas dan deadline
 
@@ -144,6 +144,8 @@ Perintah layanan:
 
 Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, RSS parser/cache/coverage dengan MockTransport, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, detail run yang menghubungkan claim/evidence/source dan coverage discovery, serta uji capability create draft dengan MockTransport dan pause/recovery guards. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model; capability dan feed test memakai server palsu. Tes live ke model atau API blog belum dilakukan.
 
+Harness evaluasi riset, retrieval/ranking/dedup, dan kalibrasi reviewer tersedia melalui `python -m takumi_research_agent.evaluation`; format, gate, dan template ada di [docs/evaluation/README.md](docs/evaluation/README.md). Dataset benchmark yang dicentang repo masih berupa template kosong, sehingga tidak ada klaim qualification model atau retrieval.
+
 ## Struktur utama
 
 | Path | Isi |
@@ -158,6 +160,7 @@ Test menguji agent runtime termasuk gold cases v1 yang memastikan observation me
 | src/takumi_research_agent/delivery | Outbox intent, approval fingerprint, dan dispatcher bertingkat capability |
 | src/takumi_research_agent/operations | Backup, verifikasi manifest, restore, import SQLite legacy, dan laporan recovery |
 | src/takumi_research_agent/persistence | SQLAlchemy models, database, dan fenced queue |
+| src/takumi_research_agent/evaluation | Qualification holdout multi-trial, reviewer calibration, retrieval/ranking/dedup metrics |
 | migrations | Schema versi Alembic |
 | web | React/TypeScript dashboard |
 | docs/planning | Plan, deep review, dan traceability requirement |

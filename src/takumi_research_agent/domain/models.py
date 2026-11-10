@@ -26,6 +26,7 @@ class SourceRecord(DomainModel):
     relevant_to_topic: bool = False
     read_status: Literal["metadata", "abstract", "full_text", "unavailable"] = "metadata"
     retracted: bool = False
+    status_alerts: list[str] = Field(default_factory=list, max_length=20)
     content_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     limitations: list[str] = Field(default_factory=list, max_length=20)
 

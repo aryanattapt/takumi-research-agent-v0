@@ -26,6 +26,7 @@ export type Blog = {
   capability_result: Record<string, any>;
   topic_settings: Record<string, boolean>;
   editorial_settings: Record<string, unknown>;
+  rss_feeds: Array<{ name: string; url: string; field: "technology" | "physics" | "chemistry" | "biology" }>;
   schedule_enabled: boolean;
   schedule_timezone: string;
   publish_time: string;

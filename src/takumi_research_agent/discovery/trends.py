@@ -246,8 +246,15 @@ class TrendCollector:
         except Exception as exc:
             return [], {"name": feed.name, "status": "failed", "items": 0, "error": type(exc).__name__}
 
-    async def collect(self, *, now: datetime | None = None) -> list[TrendCandidate]:
+    async def collect(
+        self,
+        *,
+        now: datetime | None = None,
+        rss_feeds: tuple[RSSFeedConfig, ...] | None = None,
+        coverage_sink: dict[str, Any] | None = None,
+    ) -> list[TrendCandidate]:
         now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        effective_rss_feeds = self.rss_feeds if rss_feeds is None else rss_feeds
         recent_cutoff = now - timedelta(hours=24)
         baseline_cutoff = now - timedelta(hours=72)
         query_fields: dict[str, tuple[TopicField, ...]] = {
@@ -317,10 +324,10 @@ class TrendCollector:
             async with self._rss_semaphore:
                 return await self._rss_recent(feed, recent_cutoff)
 
-        rss_results = await asyncio.gather(*(collect_rss_feed(feed) for feed in self.rss_feeds))
+        rss_results = await asyncio.gather(*(collect_rss_feed(feed) for feed in effective_rss_feeds))
         rss_feed_reports = [report for _, report in rss_results]
         rss_items = sum(len(items) for items, _ in rss_results)
-        for feed, (items, _) in zip(self.rss_feeds, rss_results):
+        for feed, (items, _) in zip(effective_rss_feeds, rss_results):
             for item in items:
                 key = (f"rss:{feed.name}", item["source_item_id"])
                 candidates[key] = {
@@ -370,14 +377,14 @@ class TrendCollector:
                 )
         results.sort(key=lambda item: (item.score, item.published_at or now), reverse=True)
         rss_succeeded = sum(report["status"] in {"ok", "not_modified"} for report in rss_feed_reports)
-        self.last_coverage = {
+        coverage = {
             "window_start": recent_cutoff.isoformat(),
             "baseline_start": baseline_cutoff.isoformat(),
             "observed_at": now.isoformat(),
             "sources": {
                 "hackernews": {"configured": len(query_fields), "successful": hn_succeeded, "failed": len(query_fields) - hn_succeeded, "hits": hn_hits},
                 "arxiv": {"configured": len(arxiv_specs), "successful": arxiv_succeeded, "failed": len(arxiv_specs) - arxiv_succeeded, "items": arxiv_items},
-                "rss": {"configured": len(self.rss_feeds), "successful": rss_succeeded, "failed": len(self.rss_feeds) - rss_succeeded, "items": rss_items, "feeds": rss_feed_reports},
+                "rss": {"configured": len(effective_rss_feeds), "successful": rss_succeeded, "failed": len(effective_rss_feeds) - rss_succeeded, "items": rss_items, "feeds": rss_feed_reports},
             },
             "candidate_count": sum(
                 item.published_at is not None
@@ -385,4 +392,8 @@ class TrendCollector:
                 for item in results
             ),
         }
+        self.last_coverage = coverage
+        if coverage_sink is not None:
+            coverage_sink.clear()
+            coverage_sink.update(coverage)
         return results
