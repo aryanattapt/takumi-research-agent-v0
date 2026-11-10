@@ -28,16 +28,23 @@ from takumi_research_agent.persistence.models import (
     ProviderProfile,
     Run,
     RunEvent,
-    SourceRecord as SourceRecordRow,
     TrendObservation,
+)
+from takumi_research_agent.persistence.models import (
+    SourceRecord as SourceRecordRow,
 )
 from takumi_research_agent.providers.anthropic_native import AnthropicProvider
 from takumi_research_agent.providers.base import ProviderConfig
 from takumi_research_agent.providers.openai_compatible import OpenAICompatibleProvider
+from takumi_research_agent.providers.rate_limit import (
+    SharedRateLimitedProvider,
+    provider_quota_key,
+)
 from takumi_research_agent.research.agent import ResearchToolbox, history_candidates
 from takumi_research_agent.research.artifacts import ArtifactStore
 from takumi_research_agent.research.browser import SourceRetriever
 from takumi_research_agent.research.evidence import EvidenceRegistrar
+from takumi_research_agent.research.semantic_history import SemanticHistoryRetriever
 from takumi_research_agent.research.url_policy import PublicSourceUrlPolicy
 from takumi_research_agent.security import SecretCipher
 from takumi_research_agent.sources import LiteratureSources
@@ -114,6 +121,13 @@ class DailyResearchProcessor:
                 timeout_seconds=provider.timeout_seconds,
             )
             provider_client = AnthropicProvider(provider_config) if provider.provider_type == "anthropic" else OpenAICompatibleProvider(provider_config)
+            if self.settings.provider_requests_per_minute:
+                provider_client = SharedRateLimitedProvider(
+                    provider_client,
+                    sessions=self.sessions,
+                    key_hash=provider_quota_key(provider.provider_type, provider.base_url, provider_key),
+                    requests_per_minute=self.settings.provider_requests_per_minute,
+                )
             blog_host = (urlsplit(blog.base_url).hostname or "").lower()
             adapter = BlogApiAdapter(
                 base_url=blog.base_url,
@@ -539,6 +553,7 @@ class DailyResearchProcessor:
         retriever = SourceRetriever(policy, browser_enabled=self.settings.headless)
         artifacts = ArtifactStore(self.settings.data_dir / "artifacts")
         budget = RequestBudget(max_requests=20, max_tool_actions=40)
+        history_retriever = None
         try:
             history = await self._sync_history_resumable(run.blog_id, run.id, adapter)
             profile_feeds = tuple(RSSFeedConfig(**feed) for feed in runtime.get("rss_feeds", []))
@@ -561,6 +576,21 @@ class DailyResearchProcessor:
             if not candidates:
                 raise PipelineBlocked("no_recent_trend_candidates")
             selected = candidates[0]
+            if self.settings.history_embedding_model:
+                history_retriever = SemanticHistoryRetriever(
+                    sessions=self.sessions,
+                    blog_id=run.blog_id,
+                    model=self.settings.history_embedding_model,
+                    api_key=self.settings.history_embedding_api_key,
+                    base_url=self.settings.history_embedding_base_url,
+                    timeout_seconds=provider.config.timeout_seconds,
+                    min_similarity=self.settings.history_embedding_min_similarity,
+                    requests_per_minute=self.settings.provider_requests_per_minute,
+                )
+                try:
+                    await history_retriever.prepare(history)
+                except Exception as exc:
+                    raise PipelineBlocked("semantic_history_index_failed") from exc
             toolbox = ResearchToolbox(
                 provider=provider,
                 budget=budget,
@@ -570,6 +600,7 @@ class DailyResearchProcessor:
                 blog_id=run.blog_id,
                 blog_history=history,
                 history_complete=bool(runtime["capability_result"].get("history_complete")),
+                history_retriever=history_retriever,
             )
             research, agent_result = await toolbox.run(
                 topic=selected.title,
@@ -579,8 +610,14 @@ class DailyResearchProcessor:
             if research is None:
                 raise PipelineBlocked(f"research_{agent_result.status}_{agent_result.reason}")
             pair_id = _hash(f"{run.blog_id}:{run.id}:{research.output.topic}")[:64]
-            lexical_scores = [item["similarity_hint"] for item in history_candidates(research.output.topic, history)]
-            novelty_clear = research.output.novelty_clear and not any(score >= 0.30 for score in lexical_scores)
+            history_candidates_for_topic = (
+                await history_retriever.search(research.output.topic)
+                if history_retriever is not None
+                else history_candidates(research.output.topic, history)
+            )
+            threshold = self.settings.history_embedding_min_similarity if history_retriever is not None else 0.30
+            history_overlap = any(item["similarity_hint"] >= threshold for item in history_candidates_for_topic)
+            novelty_clear = research.output.novelty_clear and not history_overlap
             if not novelty_clear:
                 with self.sessions.begin() as session:
                     session.add(
@@ -663,5 +700,7 @@ class DailyResearchProcessor:
         finally:
             await provider.close()
             await adapter.close()
+            if history_retriever is not None:
+                await history_retriever.close()
             await literature.close()
             await retriever.close()

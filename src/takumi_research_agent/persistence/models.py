@@ -4,7 +4,21 @@ from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -58,6 +72,14 @@ class ProviderProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     __table_args__ = (CheckConstraint("provider_type in ('openai_compatible', 'anthropic')", name="ck_provider_type"),)
+
+
+class ProviderRateGate(Base):
+    """Cross-worker request spacing for one provider credential and endpoint."""
+
+    __tablename__ = "provider_rate_gates"
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    next_allowed_at: Mapped[float] = mapped_column(Float, default=0, nullable=False)
 
 
 class BlogProfile(Base):
@@ -121,6 +143,18 @@ class BlogHistory(Base):
     snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     __table_args__ = (UniqueConstraint("blog_id", "remote_id", "language", name="uq_blog_history_remote_locale"),)
+
+
+class BlogHistoryEmbedding(Base):
+    """Cached normalized vector for one immutable blog-history text fingerprint."""
+
+    __tablename__ = "blog_history_embeddings"
+    blog_id: Mapped[str] = mapped_column(ForeignKey("blog_profiles.id", ondelete="CASCADE"), primary_key=True)
+    embedding_model: Mapped[str] = mapped_column(String(200), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    vector: Mapped[list[float]] = mapped_column(JSON, nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class BlogHistorySyncState(Base):

@@ -1,3 +1,7 @@
+import asyncio
+
+from takumi_research_agent.config import Settings
+from takumi_research_agent.evaluation import research_runner
 from takumi_research_agent.evaluation.qualification import _validate_trial
 from takumi_research_agent.evaluation.research_runner import (
     build_research_trial_document,
@@ -5,6 +9,9 @@ from takumi_research_agent.evaluation.research_runner import (
     validate_research_run_dataset,
 )
 from takumi_research_agent.evaluation.retrieval_runner import run_retrieval_dataset
+from takumi_research_agent.evaluation.semantic_retrieval import (
+    run_semantic_retrieval_dataset,
+)
 
 
 def _dataset_case():
@@ -129,3 +136,106 @@ def test_qualification_rejects_noncompleted_research_runner_outputs():
         dataset_version="research-v1",
     )
     assert any("did not produce a completed research bundle" in error for error in errors)
+
+
+def test_semantic_retrieval_runner_ranks_cross_language_candidates_and_scores_dedup():
+    class FakeEmbeddings:
+        async def create(self, *, model, input, encoding_format):
+            from types import SimpleNamespace
+
+            rows = []
+            for index, text in enumerate(input):
+                normalized = text.casefold()
+                vector = [1.0, 0.0] if any(term in normalized for term in ("quantum", "qubit", "kuantum")) else [0.0, 1.0]
+                rows.append(SimpleNamespace(index=index, embedding=vector))
+            return SimpleNamespace(data=rows)
+
+    class FakeClient:
+        embeddings = FakeEmbeddings()
+
+    dataset = {
+        "schema_version": 1,
+        "dataset_version": "retrieval-v2",
+        "corpus": [
+            {"id": "en", "title": "Quantum computing and qubits", "language": "en"},
+            {"id": "id", "title": "Komputasi kuantum dan qubit", "language": "id"},
+            {"id": "noise", "title": "Bread and baking", "language": "en"},
+        ],
+        "cases": [
+            {"case_id": "cross-language", "kind": "retrieval", "query": "Komputasi kuantum", "corpus_size": 3},
+            {"case_id": "duplicate-pair", "kind": "dedup", "left_id": "en", "right_id": "id"},
+        ],
+    }
+
+    report = asyncio.run(
+        run_semantic_retrieval_dataset(
+            dataset,
+            api_key="test-key",
+            model="multilingual-test-model",
+            code_revision="revision-test",
+            batch_size=2,
+            client=FakeClient(),
+        )
+    )
+
+    assert report["metadata"]["retriever_version"] == "openai-compatible-cosine-v1"
+    assert report["metadata"]["embedding_dimensions"] == 2
+    assert report["cases"][0]["ranked_ids"][:2] == ["en", "id"]
+    assert report["cases"][1]["predicted_duplicate"] is True
+    assert "not wired into production" in report["limitations"][0]
+
+
+def test_research_runner_concurrency_is_bounded_and_recorded(tmp_path, monkeypatch):
+    active = 0
+    maximum_active = 0
+
+    class FakeProvider:
+        async def close(self):
+            return None
+
+    async def fake_run_case(case, **kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "status": "completed",
+            "reason": "agent_finished",
+            "duration_seconds": 0.01,
+            "physical_requests": 1,
+            "tool_actions": 1,
+            "tokens_input": 10,
+            "tokens_output": 10,
+            "research": {"bundle": {}, "sources": [], "evidence": []},
+            "trace": [],
+        }
+
+    monkeypatch.setattr(research_runner, "_make_provider", lambda *args, **kwargs: FakeProvider())
+    monkeypatch.setattr(research_runner, "_run_one_case", fake_run_case)
+    dataset = {"schema_version": 1, "dataset_version": "research-v1", "cases": [_dataset_case()]}
+
+    report = asyncio.run(
+        research_runner.run_research_trials(
+            dataset,
+            output_path=tmp_path / "runs.json",
+            split="holdout",
+            trials_per_case=4,
+            provider_name="openai-compatible",
+            model="test-model",
+            api_key="test-key",
+            base_url=None,
+            timeout_seconds=10,
+            prompt_version="prompt-v1",
+            tool_schema_version="tools-v1",
+            policy_version="policy-v1",
+            adapter_version="adapter-v1",
+            code_revision="revision-test",
+            concurrency=2,
+            settings=Settings.from_env(env_file=None),
+        )
+    )
+
+    assert maximum_active == 2
+    assert report["metadata"]["run_concurrency"] == "2"
+    assert len(report["runs"]) == 4

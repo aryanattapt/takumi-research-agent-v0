@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,11 @@ class Settings:
     bootstrap_password: str
     allowed_private_hosts: tuple[str, ...]
     trend_rss_feeds: tuple[RSSFeedConfig, ...] = ()
+    provider_requests_per_minute: int = 0
+    history_embedding_model: str = ""
+    history_embedding_api_key: str = ""
+    history_embedding_base_url: str | None = None
+    history_embedding_min_similarity: float = 0.75
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = ".env") -> "Settings":
@@ -77,6 +83,30 @@ class Settings:
             ).split(",")
             if item.strip()
         )
+        raw_provider_rpm = os.getenv("PROVIDER_REQUESTS_PER_MINUTE", "0").strip()
+        try:
+            provider_requests_per_minute = int(raw_provider_rpm)
+        except ValueError as exc:
+            raise ValueError("PROVIDER_REQUESTS_PER_MINUTE must be an integer between 0 and 100000") from exc
+        if not 0 <= provider_requests_per_minute <= 100_000:
+            raise ValueError("PROVIDER_REQUESTS_PER_MINUTE must be an integer between 0 and 100000")
+
+        history_embedding_model = os.getenv("HISTORY_EMBEDDING_MODEL", "").strip()
+        history_embedding_api_key = os.getenv("HISTORY_EMBEDDING_API_KEY", "")
+        history_embedding_base_url = os.getenv("HISTORY_EMBEDDING_BASE_URL", "").strip() or None
+        if bool(history_embedding_model) != bool(history_embedding_api_key):
+            raise ValueError("HISTORY_EMBEDDING_MODEL and HISTORY_EMBEDDING_API_KEY must be configured together")
+        try:
+            history_embedding_min_similarity = float(os.getenv("HISTORY_EMBEDDING_MIN_SIMILARITY", "0.75"))
+        except ValueError as exc:
+            raise ValueError("HISTORY_EMBEDDING_MIN_SIMILARITY must be between 0 and 1") from exc
+        if not math.isfinite(history_embedding_min_similarity) or not 0 <= history_embedding_min_similarity <= 1:
+            raise ValueError("HISTORY_EMBEDDING_MIN_SIMILARITY must be between 0 and 1")
+        if history_embedding_base_url:
+            parsed_base_url = urlsplit(history_embedding_base_url)
+            if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname or parsed_base_url.username or parsed_base_url.password or parsed_base_url.fragment:
+                raise ValueError("HISTORY_EMBEDDING_BASE_URL must be an absolute HTTP(S) URL without credentials or fragment")
+
         return cls(
             database_url=os.getenv("DATABASE_URL", "postgresql+psycopg://takumi:takumi@localhost:5432/takumi"),
             master_key=os.getenv("TAKUMI_MASTER_KEY", ""),
@@ -93,6 +123,11 @@ class Settings:
                 if value.strip()
             ),
             trend_rss_feeds=_parse_rss_feeds(os.getenv("TREND_RSS_FEEDS", "[]")),
+            provider_requests_per_minute=provider_requests_per_minute,
+            history_embedding_model=history_embedding_model,
+            history_embedding_api_key=history_embedding_api_key,
+            history_embedding_base_url=history_embedding_base_url,
+            history_embedding_min_similarity=history_embedding_min_similarity,
         )
 
     def validate_runtime(self) -> list[str]:

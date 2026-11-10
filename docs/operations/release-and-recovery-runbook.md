@@ -6,8 +6,10 @@ This runbook describes the repository's local deployment and data recovery steps
 
 - Confirm the deployment target has persistent PostgreSQL and the Takumi data volume.
 - Set fresh POSTGRES_PASSWORD and TAKUMI_MASTER_KEY values in the deployment secret store. Keep a recoverable copy of TAKUMI_MASTER_KEY separately from the database and backup volume.
-- Review DATABASE_URL, SESSION_COOKIE_SECURE, TZ, RESEARCH_ALLOWED_DOMAINS, ADMIN_ENDPOINT_ALLOWLIST, WORKER_CONCURRENCY, and CAPACITY_RUN_MINUTES.
+- Review DATABASE_URL, SESSION_COOKIE_SECURE, TZ, RESEARCH_ALLOWED_DOMAINS, ADMIN_ENDPOINT_ALLOWLIST, WORKER_CONCURRENCY, CAPACITY_RUN_MINUTES, and PROVIDER_REQUESTS_PER_MINUTE. Set the last value to the provider's confirmed RPM limit; zero disables the shared gate.
 - Review the CI result for backend tests, Python compilation, migration upgrade, and dashboard build.
+- Configure the shared `PROVIDER_REQUESTS_PER_MINUTE` gate in both API and worker services using a limit confirmed for the provider credential. Zero disables the gate.
+- If enabling semantic history retrieval, configure `HISTORY_EMBEDDING_MODEL` and `HISTORY_EMBEDDING_API_KEY` in the deployment secret store, then confirm Indonesian-English support and privacy approval before the first history index build.
 - Configure and probe the selected model provider in the dashboard. Record model name, endpoint, rate limits, request timeout, and the operator who supplied the configuration.
 - Use the evaluation workflow in docs/evaluation/README.md before treating research/editorial quality as qualified. Keep run artifacts and review output in a restricted location.
 

@@ -23,7 +23,8 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
 | Import data SQLite legacy | Tersedia lewat CLI `takumi import-sqlite`: satu file lama dipetakan ke satu blog profile yang nonaktif, idempoten, dan menyimpan laporan migrasi |
 | Evaluasi kualitas riset/model | CLI run-research, blind review packet, merge hasil reviewer, dan qualification gate tersedia; dataset berlabel dan hasil provider nyata belum tersedia |
-| Evaluasi retrieval/dedup | Runner untuk baseline lexical Jaccard dan metrik retrieval/ranking/dedup tersedia; indeks semantik multilingual dan benchmark berlabel belum tersedia |
+| Evaluasi retrieval/dedup | Runner lexical dan embedding-backed tersedia; runtime dapat memakai indeks semantik tersimpan bila dikonfigurasi; benchmark berlabel dan hasil nyata belum tersedia |
+| Shared provider rate limit | Limiter per kredensial lintas worker tersedia dan dikonfigurasi lewat `PROVIDER_REQUESTS_PER_MINUTE`; nilai limit provider nyata belum dikonfigurasi |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -63,6 +64,10 @@ Lead time tidak menjamin semua profil selesai tepat waktu. Worker menghitung ula
 - `capacity_state=infeasible` berarti target lebih dekat daripada satu run, sehingga deadline tidak mungkin dipenuhi; ini dilaporkan, bukan dikejar dengan retry.
 
 `WORKER_CONCURRENCY` (1–16 lane) dan `CAPACITY_RUN_MINUTES` (estimasi wall-clock per run, default 45) dibaca oleh worker dan API, jadi setel keduanya dengan nilai yang sama. `GET /api/v1/capacity` menampilkan rencana antrean tanpa mengubah run, dan Run history menampilkan kolom Kapasitas beserta `start_by_at`.
+
+`PROVIDER_REQUESTS_PER_MINUTE` membatasi jarak awal request model per menit dengan state bersama di database. Kunci limiter adalah hash dari tipe provider, endpoint, dan kredensial; nilai `0` menonaktifkan limiter. Isi dengan batas RPM yang dikonfirmasi untuk credential/provider yang dipakai.
+
+Semantic history search bersifat opt-in. Isi `HISTORY_EMBEDDING_MODEL` dan `HISTORY_EMBEDDING_API_KEY` (serta `HISTORY_EMBEDDING_BASE_URL` bila perlu) untuk mengaktifkan embedding lintas bahasa. Pilih model yang mendukung Bahasa Indonesia dan Inggris, lalu kalibrasi `HISTORY_EMBEDDING_MIN_SIMILARITY` pada data development. Embedding cache tersimpan per blog, model, dan hash isi; pada index awal, teks history dikirim ke endpoint embeddings dan dapat menimbulkan biaya.
 
 ## Backup dan recovery
 
