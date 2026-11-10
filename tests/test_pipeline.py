@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import func, select
 
 from takumi_research_agent.config import Settings
+from takumi_research_agent.blogs.adapter import HistoryBatch
 from takumi_research_agent.delivery.service import DeliveryService
 from takumi_research_agent.discovery.trends import TrendCandidate
 from takumi_research_agent.orchestration import pipeline as pipeline_module
@@ -192,6 +193,14 @@ class FakeBlogAdapter:
     async def list_posts(self):
         self.state.blog_history_reads += 1
         return []
+
+    @property
+    def history_mapping_hash(self):
+        return "f" * 64
+
+    async def read_history_batch(self, *, checkpoint=None, max_pages=1):
+        self.state.blog_history_reads += 1
+        return HistoryBatch(records=(), checkpoint=None, complete=True, pages_read=1)
 
     async def close(self):
         return None
@@ -408,7 +417,7 @@ async def test_trend_to_article_worker_replay_recovers_without_duplicate_records
         assert coverage_events[0].details["coverage"]["sources"]["fixture"]["successful"] == 1
 
     assert state.trend_collections == 2
-    assert state.blog_history_reads == 2
+    assert state.blog_history_reads == 1
     assert state.literature_searches == 1
     assert state.source_reads == 1
     assert state.editorial_checks == 1

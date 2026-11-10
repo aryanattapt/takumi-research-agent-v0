@@ -67,6 +67,35 @@ async def test_list_pagination_detects_repeated_cursor():
 
 
 @pytest.mark.asyncio
+async def test_list_pagination_deduplicates_overlapping_pages():
+    def handler(request: httpx.Request):
+        if request.url.params.get("cursor") is None:
+            items = [{"post": {"id": "1", "title": "First", "content": "Body"}}]
+            next_cursor = "cursor-2"
+        else:
+            items = [
+                {"post": {"id": "1", "title": "First", "content": "Body"}},
+                {"post": {"id": "2", "title": "Second", "content": "Body"}},
+            ]
+            next_cursor = None
+        return httpx.Response(200, json={"data": {"items": items, "next": next_cursor}})
+
+    adapter = BlogApiAdapter(
+        base_url="https://blog.example/api",
+        token="secret",
+        mapping=mapping(pagination_mode="cursor", page_next_path="$.data.next", page_request_parameter="cursor", page_limit=5),
+        list_operation=type("Op", (), {"method": "get", "path": "/posts"})(),
+        capabilities=BlogCapabilities(list_posts=True),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        posts = await adapter.list_posts()
+    finally:
+        await adapter.close()
+    assert [post["id"] for post in posts] == ["1", "2"]
+
+
+@pytest.mark.asyncio
 async def test_history_batch_checkpoint_resumes_cursor_pagination():
     requests: list[str | None] = []
 

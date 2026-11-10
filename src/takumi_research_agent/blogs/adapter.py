@@ -42,7 +42,7 @@ class HistoryCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "pagination_mode": self.pagination_mode,
             "mapping_hash": self.mapping_hash,
             "next_cursor": self.next_cursor,
@@ -55,7 +55,7 @@ class HistoryCheckpoint:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, mapping: BlogMapping, mapping_hash: str) -> "HistoryCheckpoint":
-        if not isinstance(value, dict) or value.get("version") != 1:
+        if not isinstance(value, dict) or value.get("version") != 2:
             raise ContractError("History checkpoint version is invalid")
         if value.get("pagination_mode") != mapping.pagination_mode or value.get("mapping_hash") != mapping_hash:
             raise ContractError("History checkpoint does not match the active blog mapping")
@@ -183,8 +183,14 @@ class BlogApiAdapter:
                 raise ContractError("History pagination stopped without a continuation checkpoint")
             checkpoint = batch.checkpoint
 
-    def _history_mapping_hash(self) -> str:
-        mapping_json = json.dumps(self.mapping.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    @property
+    def history_mapping_hash(self) -> str:
+        operation = {"method": self.list_operation.method, "path": self.list_operation.path}
+        mapping_json = json.dumps(
+            {"base_url": self.base_url, "list_operation": operation, "mapping": self.mapping.model_dump(mode="json")},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return hashlib.sha256(mapping_json.encode("utf-8")).hexdigest()
 
     async def read_history_batch(
@@ -198,7 +204,7 @@ class BlogApiAdapter:
             raise ContractError("Blog adapter has not passed the list capability check")
         if type(max_pages) is not int or not 1 <= max_pages <= self.mapping.page_limit:
             raise ContractError("History batch page count is outside the configured limit")
-        mapping_hash = self._history_mapping_hash()
+        mapping_hash = self.history_mapping_hash
         if checkpoint is None:
             state = HistoryCheckpoint(self.mapping.pagination_mode, mapping_hash)
         elif isinstance(checkpoint, HistoryCheckpoint):
@@ -213,6 +219,7 @@ class BlogApiAdapter:
         seen_record_ids: set[tuple[str, str]] = set()
         seen_cursors = set(state.seen_cursors)
         current = state
+        records_seen = state.records_seen
         pages_read = 0
         for _ in range(max_pages):
             if current.pages_completed >= self.mapping.page_limit:
@@ -245,10 +252,9 @@ class BlogApiAdapter:
                 if record_id not in seen_record_ids:
                     fresh_records.append(record)
                     seen_record_ids.add(record_id)
-            if current.pages_completed + pages_read > 0 and records and not fresh_records:
-                raise ContractError("Blog API pagination made no progress; history is incomplete")
-            if current.records_seen + len(fresh_records) > 20_000:
+            if records_seen + len(fresh_records) > 20_000:
                 raise ContractError("Blog history exceeds the configured 20,000-record safety limit")
+            records_seen += len(fresh_records)
             for record in fresh_records:
                 if "title" in record:
                     record["title"] = str(record["title"])[:1_000]
@@ -281,7 +287,7 @@ class BlogApiAdapter:
                     next_page=current.next_page,
                     next_offset=current.next_offset,
                     pages_completed=pages_completed,
-                    records_seen=current.records_seen + len(fresh_records),
+                    records_seen=records_seen,
                     seen_cursors=tuple(sorted(seen_cursors)),
                 )
             elif self.mapping.pagination_mode == "page":
@@ -296,7 +302,7 @@ class BlogApiAdapter:
                     next_page=current.next_page + 1,
                     next_offset=current.next_offset,
                     pages_completed=pages_completed,
-                    records_seen=current.records_seen + len(fresh_records),
+                    records_seen=records_seen,
                     seen_cursors=current.seen_cursors,
                 )
             else:
@@ -308,7 +314,7 @@ class BlogApiAdapter:
                     next_page=current.next_page,
                     next_offset=current.next_offset + len(records),
                     pages_completed=pages_completed,
-                    records_seen=current.records_seen + len(fresh_records),
+                    records_seen=records_seen,
                     seen_cursors=current.seen_cursors,
                 )
             if pages_completed >= self.mapping.page_limit:

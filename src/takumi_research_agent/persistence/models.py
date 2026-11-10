@@ -122,6 +122,22 @@ class BlogHistory(Base):
     __table_args__ = (UniqueConstraint("blog_id", "remote_id", "language", name="uq_blog_history_remote_locale"),)
 
 
+class BlogHistorySyncState(Base):
+    """Durable continuation state for one exhaustive blog-history snapshot."""
+
+    __tablename__ = "blog_history_sync_states"
+    blog_id: Mapped[str] = mapped_column(ForeignKey("blog_profiles.id", ondelete="CASCADE"), primary_key=True)
+    sync_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    mapping_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    records_synced: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class Run(Base):
     __tablename__ = "runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

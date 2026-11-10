@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from takumi_research_agent.agent.runtime import RequestBudget
 from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities
@@ -19,6 +20,7 @@ from takumi_research_agent.persistence.models import (
     ArticlePairRecord,
     ArticleVersion,
     BlogHistory,
+    BlogHistorySyncState,
     BlogProfile,
     ContentLedger,
     EvidenceSpanRecord,
@@ -229,47 +231,152 @@ class DailyResearchProcessor:
 
     def _sync_history(self, blog_id: str, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         snapshot_id = _hash(f"{blog_id}:{datetime.now(timezone.utc).isoformat()}")[:36]
-        normalized: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
         with self.sessions.begin() as session:
-            for post in posts:
-                remote_id = str(post.get("id", "")).strip()
-                title = str(post.get("title", "")).strip()
-                if not remote_id or not title:
-                    continue
-                language = str(post.get("language") or "")[:10]
-                content = str(post.get("content") or post.get("summary") or "")[:2_500]
-                canonical = {**post, "id": remote_id, "title": title, "content": content}
-                seen.add((remote_id, language))
-                row = session.scalar(
-                    select(BlogHistory).where(
-                        BlogHistory.blog_id == blog_id,
-                        BlogHistory.remote_id == remote_id,
-                        BlogHistory.language == language,
-                    )
-                )
-                if row is None:
-                    row = BlogHistory(
-                        blog_id=blog_id,
-                        remote_id=remote_id,
-                        language=language,
-                        title=title,
-                        content_hash=_hash(content) if content else None,
-                        snapshot_id=snapshot_id,
-                        canonical_record=canonical,
-                    )
-                    session.add(row)
-                else:
-                    row.title = title
-                    row.snapshot_id = snapshot_id
-                    row.canonical_record = canonical
-                    row.content_hash = _hash(content) if content else None
-                normalized.append(canonical)
+            normalized = self._upsert_history_records(session, blog_id=blog_id, snapshot_id=snapshot_id, posts=posts)
             # A successful exhaustive GET represents the current remote history, so remove stale cache rows.
             for old in session.scalars(select(BlogHistory).where(BlogHistory.blog_id == blog_id)).all():
-                if (old.remote_id, old.language) not in seen:
+                if old.snapshot_id != snapshot_id:
                     session.delete(old)
         return normalized
+
+    def _upsert_history_records(self, session, *, blog_id: str, snapshot_id: str, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for post in posts:
+            remote_id = str(post.get("id", "")).strip()
+            title = str(post.get("title", "")).strip()
+            if not remote_id or not title:
+                continue
+            language = str(post.get("language") or "")[:10]
+            content = str(post.get("content") or post.get("summary") or "")[:2_500]
+            canonical = {**post, "id": remote_id, "title": title, "content": content}
+            row = session.scalar(
+                select(BlogHistory).where(
+                    BlogHistory.blog_id == blog_id,
+                    BlogHistory.remote_id == remote_id,
+                    BlogHistory.language == language,
+                )
+            )
+            if row is None:
+                row = BlogHistory(
+                    blog_id=blog_id,
+                    remote_id=remote_id,
+                    language=language,
+                    title=title,
+                    content_hash=_hash(content) if content else None,
+                    snapshot_id=snapshot_id,
+                    canonical_record=canonical,
+                )
+                session.add(row)
+            else:
+                row.title = title
+                row.snapshot_id = snapshot_id
+                row.canonical_record = canonical
+                row.content_hash = _hash(content) if content else None
+                row.synced_at = datetime.now(timezone.utc)
+            normalized.append(canonical)
+        return normalized
+
+    def _encode_history_checkpoint(self, checkpoint: dict[str, Any] | None) -> dict[str, Any] | None:
+        if checkpoint is None:
+            return None
+        try:
+            ciphertext = SecretCipher(self.settings.master_key).encrypt(
+                json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
+            )
+        except (TypeError, ValueError) as exc:
+            raise PipelineBlocked("history_checkpoint_encryption_failed") from exc
+        return {"version": 1, "ciphertext": ciphertext}
+
+    def _decode_history_checkpoint(self, stored: dict[str, Any] | None) -> dict[str, Any] | None:
+        if stored is None:
+            return None
+        if not isinstance(stored, dict) or stored.get("version") != 1 or not isinstance(stored.get("ciphertext"), str):
+            raise PipelineBlocked("history_checkpoint_invalid")
+        try:
+            decoded = json.loads(SecretCipher(self.settings.master_key).decrypt(stored["ciphertext"]))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise PipelineBlocked("history_checkpoint_unreadable") from exc
+        if not isinstance(decoded, dict):
+            raise PipelineBlocked("history_checkpoint_invalid")
+        return decoded
+
+    async def _sync_history_resumable(self, blog_id: str, run_id: str, adapter: BlogApiAdapter) -> list[dict[str, Any]]:
+        mapping_hash = adapter.history_mapping_hash
+        snapshot_id = _hash(f"{blog_id}:{run_id}:{mapping_hash}")[:36]
+        with self.sessions.begin() as session:
+            state = session.get(BlogHistorySyncState, blog_id)
+            if state is not None and state.sync_run_id == run_id and state.mapping_hash == mapping_hash and state.complete:
+                return [
+                    row.canonical_record
+                    for row in session.scalars(
+                        select(BlogHistory).where(BlogHistory.blog_id == blog_id, BlogHistory.snapshot_id == state.snapshot_id)
+                    ).all()
+                ]
+            if state is None:
+                state = BlogHistorySyncState(
+                    blog_id=blog_id,
+                    sync_run_id=run_id,
+                    mapping_hash=mapping_hash,
+                    snapshot_id=snapshot_id,
+                    checkpoint=None,
+                    complete=False,
+                    records_synced=0,
+                    started_at=datetime.now(timezone.utc),
+                )
+                session.add(state)
+            elif state.sync_run_id != run_id or state.mapping_hash != mapping_hash:
+                state.sync_run_id = run_id
+                state.mapping_hash = mapping_hash
+                state.snapshot_id = snapshot_id
+                state.checkpoint = None
+                state.complete = False
+                state.records_synced = 0
+                state.started_at = datetime.now(timezone.utc)
+                state.completed_at = None
+            snapshot_id = state.snapshot_id
+            checkpoint = self._decode_history_checkpoint(state.checkpoint)
+
+        while True:
+            batch = await adapter.read_history_batch(checkpoint=checkpoint, max_pages=1)
+            if batch.pages_read < 1:
+                raise PipelineBlocked("history_batch_made_no_progress")
+            if batch.complete == (batch.checkpoint is not None):
+                raise PipelineBlocked("history_batch_continuation_invalid")
+            completed_history: list[dict[str, Any]] | None = None
+            with self.sessions.begin() as session:
+                state = session.get(BlogHistorySyncState, blog_id)
+                if state is None or state.snapshot_id != snapshot_id or state.mapping_hash != mapping_hash:
+                    raise PipelineBlocked("history_sync_superseded")
+                self._upsert_history_records(session, blog_id=blog_id, snapshot_id=snapshot_id, posts=list(batch.records))
+                state.checkpoint = self._encode_history_checkpoint(batch.checkpoint.to_dict() if batch.checkpoint else None)
+                state.complete = batch.complete
+                state.records_synced = session.scalar(
+                    select(func.count()).select_from(BlogHistory).where(
+                        BlogHistory.blog_id == blog_id,
+                        BlogHistory.snapshot_id == snapshot_id,
+                    )
+                ) or 0
+                if batch.complete:
+                    state.completed_at = datetime.now(timezone.utc)
+                    for old in session.scalars(
+                        select(BlogHistory).where(
+                            BlogHistory.blog_id == blog_id,
+                            BlogHistory.snapshot_id != snapshot_id,
+                        )
+                    ).all():
+                        session.delete(old)
+                    completed_history = [
+                        row.canonical_record
+                        for row in session.scalars(
+                            select(BlogHistory).where(
+                                BlogHistory.blog_id == blog_id,
+                                BlogHistory.snapshot_id == snapshot_id,
+                            )
+                        ).all()
+                    ]
+            if batch.complete:
+                return completed_history or []
+            checkpoint = batch.checkpoint.to_dict()
 
     def _persist_article(
         self,
@@ -398,8 +505,7 @@ class DailyResearchProcessor:
         artifacts = ArtifactStore(self.settings.data_dir / "artifacts")
         budget = RequestBudget(max_requests=20, max_tool_actions=40)
         try:
-            posts = await adapter.list_posts()
-            history = self._sync_history(run.blog_id, posts)
+            history = await self._sync_history_resumable(run.blog_id, run.id, adapter)
             candidates = await self.trends.collect()
             self._record_discovery_coverage(run.id, getattr(self.trends, "last_coverage", {}))
             self._record_trends(candidates)
