@@ -18,7 +18,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
 | Publish bila didukung jurnal; selain itu draft | Kebijakan keputusan tersedia; remote draft/publish menunggu kontrak blog dan capability test |
-| Evaluasi kualitas model, benchmark 10 blog, backup/restore | Belum selesai |
+| Evaluasi kualitas model, benchmark 10 blog, restore live | Belum selesai; backup/restore scripts tersedia, tetapi belum diuji terhadap Docker |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -32,7 +32,7 @@ Headless browser lokal menghindari langganan search API berbayar untuk pengambil
 
 4. Buka http://localhost:8000, buat akun administrator, lalu konfigurasi provider dan blog.
 
-Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data database serta artifact sumber berada pada Docker volumes. Backup dan restore produksi belum dilengkapi runbook otomatis.
+Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data database serta artifact sumber berada pada Docker volumes. Jalankan [panduan backup dan restore](docs/operations/backup-restore.md) untuk menyimpan dan memulihkan volume tersebut. Restore otomatis mengaktifkan recovery mode dan content pause; UAT restore live masih diperlukan.
 
 ### Konfigurasi pertama
 
@@ -103,6 +103,7 @@ Tes menguji agent runtime, mapping/pagination blog, policy editorial, quota/leas
 | migrations | Schema versi Alembic |
 | web | React/TypeScript dashboard |
 | docs/planning | Plan, deep review, dan traceability requirement |
+| docs/operations dan scripts | Runbook serta skrip backup/restore Docker Compose |
 
 ## Atribusi
 
