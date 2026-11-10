@@ -113,6 +113,9 @@ def _dataset_errors(dataset: dict[str, Any], *, minimum_cases: int = 40) -> tupl
 def _validate_trial(trial: dict[str, Any], *, case_ids: set[str], dataset_version: str) -> list[str]:
     errors = []
     case_id = trial.get("case_id")
+    execution_status = trial.get("execution_status")
+    if execution_status is not None and execution_status != "completed":
+        errors.append(f"trial {case_id!r} did not produce a completed research bundle")
     if case_id not in case_ids:
         errors.append(f"trial references unknown case_id {case_id!r}")
     metadata = trial.get("metadata")

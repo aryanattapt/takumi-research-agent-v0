@@ -998,6 +998,12 @@ Status berikut mengacu pada source code dan verifikasi lokal dalam repository. S
 | M6 — Deadline dan kapasitas | Sebagian besar | Daily quota slot, lead-time scheduling, worker polling, heartbeat, batas concurrency per worker, admission control earliest-deadline-first lintas blog dengan status `at_risk`/`infeasible` dan `start_by_at` per run, serta simulasi kapasitas 10 profil bertarget sama. | Shared provider rate limit (menunggu limit nyata dari provider), publisher live, dan benchmark wall-clock 10 blog dengan model sungguhan. |
 | M7 — Deployment, UAT, dan rollout | Sebagian | Dockerfile multi-stage, Docker Compose PostgreSQL/API/worker, migrasi saat startup, CI untuk backend/frontend, serta CLI `backup`/`verify-backup`/`restore` dengan recovery mode dan panel status di dashboard. | Kontrak dan sandbox API blog, live UAT, shadow run, dan pilot. |
 
+#### Addendum evaluasi dan operasi
+
+Tooling sekarang mencakup CLI read-only untuk menjalankan research agent secara berulang dengan provider yang dipilih, menyimpan token/durasi/trace/evidence, membuat packet review tanpa gold label dan metadata provider/model, serta menggabungkan anotasi manusia kembali ke format qualification. Runner retrieval menjalankan baseline lexical Jaccard agar retrieval/ranking/dedup dapat diukur; indeks semantic multilingual belum dibuat. Test deterministik untuk kontrak runner masuk ke suite pytest yang dijalankan CI. Tidak ada live provider run atau hasil reviewer yang diklaim.
+
+Dataset benchmark yang di-commit tetap kosong dan harus diisi reviewer manusia. Runbook deployment/backup/recovery tersedia sebagai langkah operasional; restore rehearsal pada deployment nyata masih belum dilakukan. Provider credentials, limit, dan hasil qualification juga belum tersedia.
+
 Verifikasi lokal saat ini menjalankan unit/API tests dan production build dashboard. Hasil pass bukan pengganti evaluasi kualitas model atau UAT live. Untuk keadaan rilis paling baru, lihat README dan hasil commit implementasi.
 
 Keputusan keselamatan untuk versi ini: semua run menyimpan artikel secara lokal; tidak ada jalur otomatis yang menulis ke API blog. Setelah kontrak API tersedia, capability create-draft/publish, lookup/reconciliation, idempotency, dan hasil remote perlu dibuktikan sebelum melepas gate tersebut.

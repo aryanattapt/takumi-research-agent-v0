@@ -2,6 +2,50 @@
 
 The evaluation commands score versioned inputs; they do not create ground truth. Keep development data separate from holdout data, snapshot the source material, and have humans adjudicate the labels before using a dataset for a release decision.
 
+## Run the research agent
+
+The run-research command executes the existing read-only research agent against cases in a dataset. It makes live model and public-source requests and consumes provider tokens. It does not call a blog API.
+
+Each runnable case needs topic, field, history_complete, blog_history, and optional trend_metrics. Set history_complete explicitly: use false when the blog snapshot is incomplete and true only when an empty or populated snapshot is known to be complete. Keep benchmark corpora, source snapshots, and gold labels out of the run output directory.
+
+    export OPENAI_API_KEY="..."
+    export TAKUMI_EVAL_MODEL="provider-model-name"
+    python -m takumi_research_agent.evaluation run-research \
+      --dataset evals/research-dataset-v1.json \
+      --output data/evaluations/research-runs.json \
+      --provider openai-compatible \
+      --model "$TAKUMI_EVAL_MODEL" \
+      --prompt-version research-prompt-v1 \
+      --split holdout \
+      --trials-per-case 3
+
+For Anthropic, use --provider anthropic --model MODEL_NAME and set ANTHROPIC_API_KEY. The --api-key-env option selects a different environment variable. The --base-url option supports a compatible endpoint. The --browser option enables the local Playwright fallback and requires the browser extra. Runs are sequential to avoid uncontrolled parallel load. The output records duration, physical request/tool counts, token usage, version metadata, trace, research bundle, sources, and evidence. Use --resume to continue a compatible run after interruption; provider/model/prompt/tool/policy/adapter/code/dataset metadata must match. The code revision is read from git; in a deployment without git metadata, set TAKUMI_CODE_REVISION or pass --code-revision explicitly.
+
+Run output and generated artifacts can contain model responses, source excerpts, and evidence. Keep them out of public commits and follow the access controls used for other research data.
+
+## Human review workflow
+
+Create a review packet from the raw run file:
+
+    python -m takumi_research_agent.evaluation review-packet \
+      --dataset evals/research-dataset-v1.json \
+      --runs data/evaluations/research-runs.json \
+      --output data/evaluations/research-review.json
+
+The packet omits gold labels and provider/model metadata from the reviewer view. A reviewer fills review.adjudicated, review.reviewers, and each metric in review.metrics. The review must be independent of the model being measured. Then merge those annotations with the immutable run manifest:
+
+    python -m takumi_research_agent.evaluation build-trials \
+      --dataset evals/research-dataset-v1.json \
+      --runs data/evaluations/research-runs.json \
+      --reviews data/evaluations/research-review.json \
+      --output data/evaluations/research-trials-v1.json
+
+    python -m takumi_research_agent.evaluation research \
+      --dataset evals/research-dataset-v1.json \
+      --trials data/evaluations/research-trials-v1.json
+
+Incomplete annotations stay incomplete; the merger does not fill metrics or create adjudications. Runs that did not produce a completed research bundle are blocked from qualification. The qualification evaluator still requires the independently sourced and human-labeled dataset described below.
+
 ## Research and evidence quality
 
 Add at least 40 cases across the four fields, with at least 10 per field and both development and holdout splits. Each case needs one or more source snapshots (`url`, SHA-256), human reviewer IDs, an adjudicated decision (`pass`, `fail`, or `uncertain`), and gold metric counts. The holdout must have three independently executed trials per case by default. Each trial's metrics need independent human evaluation with reviewer IDs; the model under evaluation cannot grade itself. Trial metadata binds the report to provider, model, prompt, tool schema, policy, adapter, code revision, and dataset versions.
@@ -25,6 +69,19 @@ The versioned corpus has three case kinds:
 - `dedup`: a pair, `gold_duplicate`, cross-language flag, adjudicators, and source snapshots.
 
 The initial suite requires 40 queries per retrieval/ranking kind and 40 dedup pairs, at least 20 cross-language pairs. It reports recall@20, NDCG@20, and duplicate precision/recall. The release gates in section 17.3 are 95% recall@20 and 95% duplicate precision and recall.
+
+The benchmark corpus is stored once at the top level of the dataset as corpus, with records containing id, title, and optional summary, content, and language. Retrieval/ranking cases need query; dedup cases need left_id and right_id references into that corpus. Generate predictions with:
+
+    python -m takumi_research_agent.evaluation run-retrieval \
+      --dataset evals/retrieval-dataset-v1.json \
+      --output data/evaluations/retrieval-results-v1.json \
+      --duplicate-threshold 0.10
+
+    python -m takumi_research_agent.evaluation retrieval \
+      --dataset evals/retrieval-dataset-v1.json \
+      --results data/evaluations/retrieval-results-v1.json
+
+This runner measures the current lexical Jaccard retriever and records its version. It is a baseline, not the planned multilingual semantic index. Tune the duplicate threshold on development data and freeze it before scoring holdout data.
 
 ```sh
 python -m takumi_research_agent.evaluation retrieval \
