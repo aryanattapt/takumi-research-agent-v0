@@ -7,8 +7,18 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
-from takumi_research_agent.blogs.contracts import BlogMapping, ContractError, infer_collection_path, infer_response_mapping, normalize_records
+from takumi_research_agent.blogs.adapter import (
+    BlogApiAdapter,
+    BlogCapabilities,
+    DeliveryOutcomeUnknown,
+)
+from takumi_research_agent.blogs.contracts import (
+    BlogMapping,
+    ContractError,
+    infer_collection_path,
+    infer_response_mapping,
+    normalize_records,
+)
 
 
 def mapping(**overrides):
@@ -30,6 +40,11 @@ def test_nested_response_and_payload_mapping_are_data_driven():
     from takumi_research_agent.blogs.contracts import build_create_payload
     payload = build_create_payload({"title": "Title", "content": "Body", "locale": "id", "status": "publish"}, adapter_mapping)
     assert payload == {"article": {"title": "Title", "body": "Body", "language": "id", "state": "live"}}
+
+
+def test_mapping_serialization_sorts_required_response_fields():
+    adapter_mapping = mapping(response_fields_required={"title", "id"})
+    assert adapter_mapping.model_dump(mode="json")["response_fields_required"] == ["id", "title"]
 
 
 def test_ambiguous_sample_mapping_does_not_guess_collection():
