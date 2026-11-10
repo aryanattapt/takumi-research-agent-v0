@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import multiprocessing
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from takumi_research_agent.api.app import create_app
 from takumi_research_agent.blogs.adapter import BlogApiAdapter, BlogCapabilities, DeliveryOutcomeUnknown
 from takumi_research_agent.blogs.contracts import BlogMapping
 from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER, DeliveryBlocked, DeliveryService
+from takumi_research_agent.config import Settings
+from takumi_research_agent.operations.backup import create_backup, restore_backup
 from takumi_research_agent.persistence.database import create_database
 from takumi_research_agent.persistence.models import (
     ArticlePairRecord,
@@ -50,7 +57,13 @@ class FakeAdapter:
         return {"http_status": 201, "body": {"post": {"id": f"remote-{len(self.calls)}"}}}
 
 
-def _environment(*, execution_mode: str = "sandbox", create_draft: bool = True, database_url: str = "sqlite:///:memory:"):
+def _environment(
+    *,
+    execution_mode: str = "sandbox",
+    create_draft: bool = True,
+    database_url: str = "sqlite:///:memory:",
+    return_engine: bool = False,
+):
     engine, sessions = create_database(database_url)
     Base.metadata.create_all(engine)
     now = datetime.now(timezone.utc)
@@ -119,7 +132,37 @@ def _environment(*, execution_mode: str = "sandbox", create_draft: bool = True, 
                     remote_status="not_sent",
                 )
             )
-    return sessions
+    return (engine, sessions) if return_engine else sessions
+
+
+def _dispatch_until_parent_kills(database_url, request_started, release_request, accepted_posts):
+    """Run the real dispatcher in a child process and hold it after fake remote acceptance."""
+    engine, sessions = create_database(database_url)
+
+    class BlockingAcceptedAdapter:
+        mapping = BlogMapping.model_validate(MAPPING)
+        capabilities = BlogCapabilities(list_posts=True, create_draft=True, publish=True, idempotency_key=True)
+
+        async def send_payload(self, payload, *, intent_key: str, publish: bool):
+            accepted = {
+                "locale": payload["article"]["language"],
+                "remote_id": "remote-accepted-1",
+                "intent_key": intent_key,
+            }
+            accepted_posts.append(accepted)
+            request_started.set()
+            if not release_request.wait(120):
+                raise TimeoutError("parent did not release the simulated request")
+            return {"http_status": 201, "body": {"post": {"id": accepted["remote_id"]}}}
+
+    async def dispatch():
+        with sessions() as session:
+            await DeliveryService().dispatch(session, run_id="run-1", adapter=BlockingAcceptedAdapter())
+
+    try:
+        asyncio.run(dispatch())
+    finally:
+        engine.dispose()
 
 
 def _intents(sessions):
@@ -381,3 +424,126 @@ async def test_restart_after_remote_acceptance_never_reposts_success_or_unknown_
         assert len(remote_posts) == 2
     finally:
         await real_adapter.close()
+
+
+def test_killed_dispatch_restore_reconciles_unknown_without_reposting(tmp_path):
+    database_path = tmp_path / "cross-process-recovery.sqlite3"
+    database_url = "sqlite:///" + str(database_path)
+    engine, sessions = _environment(database_url=database_url, return_engine=True)
+    master_key = "test-master-key-" * 4
+    settings = replace(
+        Settings.from_env(env_file=None),
+        database_url=database_url,
+        data_dir=tmp_path / "app-data",
+        master_key=master_key,
+        session_cookie_secure=False,
+    )
+    app = create_app(settings, engine=engine, sessions=sessions)
+    try:
+        # Keep an administrator in the backup so the restored operator can reconcile it.
+        with TestClient(app) as client:
+            bootstrap = client.post(
+                "/api/v1/setup/admin",
+                json={"username": "admin", "password": "correct-horse-battery-staple"},
+            )
+            assert bootstrap.status_code == 201, bootstrap.text
+
+        with sessions.begin() as session:
+            control = session.get(GlobalSettings, 1)
+            control.recovery_mode = False
+            control.content_mutations_paused = False
+            session.flush()
+            DeliveryService().prepare(session, run_id="run-1")
+
+        context = multiprocessing.get_context("spawn")
+        manager = context.Manager()
+        request_started = context.Event()
+        release_request = context.Event()
+        accepted_posts = manager.list()
+        process = context.Process(
+            target=_dispatch_until_parent_kills,
+            args=(database_url, request_started, release_request, accepted_posts),
+        )
+        try:
+            process.start()
+            assert request_started.wait(30), "child dispatcher did not reach the fake remote request"
+            assert len(accepted_posts) == 1
+            assert accepted_posts[0]["locale"] == "en"
+
+            # The snapshot captures dispatching + in_flight while the request is unresolved.
+            manifest = create_backup(
+                sessions,
+                artifacts_root=tmp_path / "artifacts",
+                output_dir=tmp_path / "backups",
+                backup_id="dispatch-in-flight",
+            )
+            assert manifest["database"]["rows"]["delivery_intents"] == 2
+            with sessions() as session:
+                dispatching = session.query(DeliveryIntent).filter_by(unit_key="article:en").one()
+                assert dispatching.state == "dispatching"
+                assert session.query(DeliveryAttempt).filter_by(intent_id=dispatching.id).one().outcome == "in_flight"
+
+            process.kill()
+            process.join(timeout=10)
+            assert not process.is_alive()
+            assert process.exitcode is not None and process.exitcode != 0
+
+            with sessions.begin() as session:
+                report = restore_backup(
+                    session,
+                    backup_path=tmp_path / "backups" / "dispatch-in-flight",
+                    artifacts_root=tmp_path / "artifacts",
+                    master_key=master_key,
+                    acknowledge=True,
+                )
+            assert len(report["unknown_intents"]) == 1
+
+            with sessions() as session:
+                restored = session.query(DeliveryIntent).filter_by(unit_key="article:en").one()
+                attempt = session.query(DeliveryAttempt).filter_by(intent_id=restored.id).one()
+                assert restored.state == "unknown"
+                assert attempt.outcome == "unknown"
+                assert session.get(GlobalSettings, 1).recovery_mode is True
+
+            with TestClient(app) as client:
+                login = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "correct-horse-battery-staple"},
+                )
+                assert login.status_code == 200, login.text
+                reconciled = client.post(
+                    f"/api/v1/runs/run-1/delivery/{restored.id}/reconcile",
+                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                    json={
+                        "outcome": "succeeded",
+                        "remote_id": accepted_posts[0]["remote_id"],
+                        "note": "Confirmed by the simulated blog after worker termination",
+                    },
+                )
+                assert reconciled.status_code == 200, reconciled.text
+                assert reconciled.json()["state"] == "succeeded"
+
+            # Once recovery is explicitly cleared, only the other locale may dispatch.
+            with sessions.begin() as session:
+                control = session.get(GlobalSettings, 1)
+                control.recovery_mode = False
+                control.content_mutations_paused = False
+            resumed_adapter = FakeAdapter(BlogMapping.model_validate(MAPPING))
+            with sessions() as session:
+                summary = asyncio.run(DeliveryService().dispatch(session, run_id="run-1", adapter=resumed_adapter))
+
+            assert summary["succeeded"] == 1
+            assert [call["payload"]["article"]["language"] for call in resumed_adapter.calls] == ["id"]
+            assert len(accepted_posts) == 1
+            with sessions() as session:
+                final = session.query(DeliveryIntent).filter_by(unit_key="article:en").one()
+                attempt = session.query(DeliveryAttempt).filter_by(intent_id=final.id).one()
+                assert final.state == "succeeded" and final.remote_id == "remote-accepted-1"
+                assert attempt.outcome == "succeeded"
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+            manager.shutdown()
+    finally:
+        engine.dispose()

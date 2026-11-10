@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 from collections import deque
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
 from takumi_research_agent.agent.runtime import AgentRuntime, RequestBudget, ToolDefinition, ToolRegistry
 from takumi_research_agent.providers.base import ModelReply, ToolCall
+
+
+GOLD_DATASET = json.loads((Path(__file__).parent / "fixtures" / "agent-runtime-gold-v1.json").read_text(encoding="utf-8"))
 
 
 class EmptyArgs(BaseModel):
@@ -24,22 +29,59 @@ class FakeProvider:
 
 
 @pytest.mark.asyncio
-async def test_tool_observation_changes_next_action_and_budget_is_counted():
-    async def observe(_):
-        return {"papers": 2}
+@pytest.mark.parametrize("case", GOLD_DATASET["cases"], ids=lambda case: case["id"])
+async def test_versioned_gold_cases_check_observation_driven_actions(case):
+    actions = []
+
+    class AdaptiveFixtureProvider:
+        def __init__(self):
+            self.requests = 0
+
+        async def complete(self, messages, _tools, *, max_output_tokens, temperature=0):
+            self.requests += 1
+            tool_messages = [message for message in messages if message.role == "tool"]
+            if not tool_messages:
+                return ModelReply("", (ToolCall("search", "literature.search", {}),), "tool_call")
+
+            last_observation = tool_messages[-1]
+            observation = json.loads(last_observation.content)
+            if last_observation.tool_name == "literature.search":
+                papers = observation.get("papers", [])
+                if not papers:
+                    return ModelReply("No eligible source was found; research stops here.")
+                source_id = papers[0]["source_id"]
+                return ModelReply("", (ToolCall("read", "sources.read", {"source_id": source_id}),), "tool_call")
+
+            return ModelReply(f"Evidence checked: {observation['title']}. {observation['finding']}")
+
+    async def search(_):
+        actions.append("literature.search")
+        return case["search_observation"]
+
+    async def read(arguments):
+        actions.append("sources.read")
+        source = case["readable_source"]
+        assert arguments.source_id == source["source_id"]
+        return source
 
     registry = ToolRegistry(blog_id="blog-1")
-    registry.register(ToolDefinition("literature.search", "Search papers", EmptyArgs, observe))
-    provider = FakeProvider([
-        ModelReply("", (ToolCall("c1", "literature.search", {}),), "tool_call"),
-        ModelReply("Found two papers; continue with the selected result.", stop_reason="complete"),
-    ])
+    registry.register(ToolDefinition("literature.search", "Search sources", EmptyArgs, search))
+
+    class ReadArgs(BaseModel):
+        source_id: str
+
+    registry.register(ToolDefinition("sources.read", "Read a source", ReadArgs, read))
+    provider = AdaptiveFixtureProvider()
     budget = RequestBudget(max_requests=20, max_tool_actions=40)
-    result = await AgentRuntime(provider, registry, budget=budget).run("Research", system="Use evidence.")
-    assert result.status == "completed"
-    assert result.physical_requests == 2
-    assert result.tool_actions == 1
-    assert result.content.startswith("Found two")
+    result = await AgentRuntime(provider, registry, budget=budget).run("Research the fixture topic", system="Use observations to decide what to read.")
+
+    assert result.status == case["expected_status"]
+    assert result.reason == case["expected_reason"]
+    assert actions == case["expected_actions"]
+    assert result.physical_requests == case["expected_physical_requests"]
+    assert result.tool_actions == len(case["expected_actions"])
+    assert case["expected_final_contains"] in result.content
+    assert provider.requests == result.physical_requests
 
 
 @pytest.mark.asyncio

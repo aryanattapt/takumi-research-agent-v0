@@ -1,0 +1,42 @@
+{
+  "dataset": "takumi-agent-runtime-gold",
+  "version": "1.0.0",
+  "scope": "Deterministic runtime contract baseline. This does not qualify real model research quality.",
+  "cases": [
+    {
+      "id": "search-result-guides-source-read",
+      "search_observation": {
+        "papers": [
+          {
+            "source_id": "doi:10.5555/runtime-gold-1",
+            "title": "A controlled study of cell survival"
+          }
+        ]
+      },
+      "readable_source": {
+        "source_id": "doi:10.5555/runtime-gold-1",
+        "title": "A controlled study of cell survival",
+        "finding": "measured samples changed under controlled conditions"
+      },
+      "expected_actions": ["literature.search", "sources.read"],
+      "expected_status": "completed",
+      "expected_reason": "agent_finished",
+      "expected_physical_requests": 3,
+      "expected_final_contains": "measured samples changed under controlled conditions"
+    },
+    {
+      "id": "empty-search-stops-without-source-read",
+      "search_observation": {"papers": []},
+      "readable_source": {
+        "source_id": "unused",
+        "title": "Unused fixture source",
+        "finding": "This must not be read"
+      },
+      "expected_actions": ["literature.search"],
+      "expected_status": "completed",
+      "expected_reason": "agent_finished",
+      "expected_physical_requests": 2,
+      "expected_final_contains": "No eligible source was found"
+    }
+  ]
+}

@@ -21,7 +21,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Uji kapasitas dan antrean 10 blog | Simulasi antrean 10 profil dengan target sama tersedia sebagai test; benchmark wall-clock nyata dengan provider/model sungguhan belum dilakukan |
 | Backup, verifikasi, dan restore | Tersedia lewat CLI: snapshot database + manifest artifact ber-hash, restore wajib `--acknowledge` dan selalu menyalakan recovery mode |
 | Import data SQLite legacy | Tersedia lewat CLI `takumi import-sqlite`: satu file lama dipetakan ke satu blog profile yang nonaktif, idempoten, dan menyimpan laporan migrasi |
-| Evaluasi kualitas model | Belum selesai |
+| Evaluasi kualitas model | Baseline runtime deterministik v1 tersedia di CI; qualification mutu riset per model belum selesai |
 
 Headless browser lokal menghindari langganan search API berbayar untuk pengambilan halaman publik. Layanan model, bandwidth, mesin, dan hosting tetap dapat menimbulkan biaya.
 
@@ -141,7 +141,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Test menguji agent runtime, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, crash setelah blog menerima post, outbox delivery/reconciliation, quota/lease, dan API dashboard dengan SQLite/fixture. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, dan API dashboard dengan SQLite/fixture. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 
