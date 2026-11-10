@@ -200,6 +200,13 @@ class FakeBlogAdapter:
 class FakeTrendCollector:
     def __init__(self, state: FixtureState):
         self.state = state
+        self.last_coverage = {
+            "window_start": "2026-11-09T00:00:00+00:00",
+            "baseline_start": "2026-11-07T00:00:00+00:00",
+            "observed_at": "2026-11-10T00:00:00+00:00",
+            "candidate_count": 1,
+            "sources": {"fixture": {"configured": 1, "successful": 1, "failed": 0, "items": 1}},
+        }
 
     async def collect(self):
         self.state.trend_collections += 1
@@ -328,7 +335,7 @@ async def test_trend_to_article_worker_replay_recovers_without_duplicate_records
 
     monkeypatch.setattr(pipeline_module, "OpenAICompatibleProvider", lambda config: FakeProvider(config, state))
     monkeypatch.setattr(pipeline_module, "BlogApiAdapter", lambda **kwargs: FakeBlogAdapter(state=state, **kwargs))
-    monkeypatch.setattr(pipeline_module, "TrendCollector", lambda: FakeTrendCollector(state))
+    monkeypatch.setattr(pipeline_module, "TrendCollector", lambda **_kwargs: FakeTrendCollector(state))
     monkeypatch.setattr(pipeline_module, "LiteratureSources", lambda **kwargs: FakeLiteratureSources(state=state, **kwargs))
     monkeypatch.setattr(pipeline_module, "SourceRetriever", FakeRetriever)
 
@@ -396,6 +403,9 @@ async def test_trend_to_article_worker_replay_recovers_without_duplicate_records
         events = session.scalars(select(RunEvent).where(RunEvent.run_id == run.id)).all()
         assert sum(event.event_type == "article_pair_saved" for event in events) == 1
         assert sum(event.event_type == "delivery_prepared" for event in events) == 1
+        coverage_events = [event for event in events if event.event_type == "discovery_coverage"]
+        assert len(coverage_events) == 1
+        assert coverage_events[0].details["coverage"]["sources"]["fixture"]["successful"] == 1
 
     assert state.trend_collections == 2
     assert state.blog_history_reads == 2

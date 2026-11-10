@@ -13,7 +13,7 @@ Repository sudah memiliki fondasi agent, dashboard, migrasi database, worker ter
 | Maksimal 10 blog dan dashboard konfigurasi | Tersedia |
 | Provider OpenAI-compatible dan Anthropic | Adapter tersedia; kredensial/model perlu dikonfigurasi dan di-probe |
 | Jadwal harian default pukul 06:00 Asia/Jakarta | Worker dan slot harian tersedia; mulai menyiapkan 120 menit sebelumnya, dan admission control menandai slot `at_risk`/`infeasible` bila antrean tidak muat sebelum target |
-| Sinyal tren teknologi dan sains | Hacker News Algolia dan arXiv dengan skor heuristik yang transparan |
+| Sinyal tren teknologi dan sains | Hacker News Algolia, arXiv, dan RSS publik terkonfigurasi dengan skor heuristik yang transparan |
 | Riwayat dan mapping JSON blog | GET read-only, OpenAPI operation list, JSONPath terbatas, preview dan pagination |
 | Riset jurnal dan sumber primer | Crossref, Europe PMC, pemeriksaan DOAJ, pembaca HTTP dan Playwright |
 | Evidence serta artikel bilingual | Pipeline ID/EN, critic pass, sanitasi, hash dan penyimpanan draft |
@@ -49,7 +49,7 @@ Compose menjalankan PostgreSQL, migrasi Alembic, API/dashboard, dan worker. Data
 7. Jalankan sandbox run untuk menyiapkan intent delivery, lalu buka Run history dan konfirmasi Kirim ke blog. Dry-run tidak pernah mengirim request. Jika intent `unknown` atau `dispatching` lebih dari dua menit, periksa riwayat blog sebelum memilih Sukses/Gagal; menandai gagal akan membuka intent untuk retry dan bisa membuat duplikat bila post sebenarnya sudah ada.
 8. Buka Run history untuk melihat keputusan, hasil review, artikel Indonesia/English, dan status outbox delivery.
 
-Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset.
+Remote OpenAPI URL harus memakai HTTPS dan host-nya dicantumkan di ADMIN_ENDPOINT_ALLOWLIST. URL OpenAPI tanpa allowlist gagal tertutup. RESEARCH_ALLOWED_DOMAINS membatasi host yang dapat dibaca tool riset. Feed RSS opsional dikonfigurasi secara global lewat `TREND_RSS_FEEDS` sebagai JSON array berisi `name`, `url`, dan `field` (`technology`, `physics`, `chemistry`, atau `biology`); setiap host feed harus ditambahkan ke `RESEARCH_ALLOWED_DOMAINS`. Hanya HTTPS yang diterima. Feed diambil dengan batas 2 MB, cache kondisional ETag/Last-Modified, dan kegagalannya terlihat pada Coverage discovery di detail Run. Pengaturan feed terpisah per profil blog belum tersedia.
 
 ### Kapasitas dan deadline
 
@@ -142,7 +142,7 @@ Perintah layanan:
     npm --prefix web run build
     DATABASE_URL=sqlite:////tmp/takumi-migration-check.db python -m alembic upgrade head
 
-Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, detail run yang menghubungkan claim/evidence/source, dan uji capability create draft dengan MockTransport serta pause/recovery guards. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model; capability test memakai blog palsu. Tes live ke model atau API blog belum dilakukan.
+Test menguji agent runtime termasuk gold cases v1 yang memastikan observation mengubah aksi berikutnya, mapping/pagination blog, RSS parser/cache/coverage dengan MockTransport, policy editorial, fixture trend-to-article, replay worker setelah crash tanpa duplikasi, kill proses saat request blog tertahan, restore ke status `unknown`, rekonsiliasi operator tanpa repost, outbox delivery, quota/lease, detail run yang menghubungkan claim/evidence/source dan coverage discovery, serta uji capability create draft dengan MockTransport dan pause/recovery guards. Gold cases ini menguji kontrak runtime deterministik, bukan mutu jawaban model; capability dan feed test memakai server palsu. Tes live ke model atau API blog belum dilakukan.
 
 ## Struktur utama
 
@@ -151,7 +151,7 @@ Test menguji agent runtime termasuk gold cases v1 yang memastikan observation me
 | src/takumi_research_agent/api | Auth, konfigurasi dashboard, probe, runs, dan read-only adapter validation |
 | src/takumi_research_agent/agent | Tool loop bertipe dan batas request/action |
 | src/takumi_research_agent/blogs | OpenAPI loader, JSONPath mapping, history reader, dan guarded create primitive |
-| src/takumi_research_agent/discovery | Trend collector Hacker News/arXiv dan skor heuristik |
+| src/takumi_research_agent/discovery | Trend collector Hacker News/arXiv/RSS, coverage source, dan skor heuristik |
 | src/takumi_research_agent/research | Retriever, browser fallback, artifacts, evidence, serta research tools |
 | src/takumi_research_agent/editorial | Penulis bilingual, critic, sanitizer, dan final body |
 | src/takumi_research_agent/orchestration | Jadwal slot, admission control kapasitas, worker lease, dan research-to-local-draft pipeline |

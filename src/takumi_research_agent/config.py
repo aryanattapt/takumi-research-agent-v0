@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
+
+@dataclass(frozen=True, slots=True)
+class RSSFeedConfig:
+    name: str
+    url: str
+    field: Literal["technology", "physics", "chemistry", "biology"]
+
+
+def _parse_rss_feeds(raw: str) -> tuple[RSSFeedConfig, ...]:
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("TREND_RSS_FEEDS must be a JSON array") from exc
+    if not isinstance(values, list) or len(values) > 50:
+        raise ValueError("TREND_RSS_FEEDS must be an array with at most 50 feeds")
+    fields = {"technology", "physics", "chemistry", "biology"}
+    feeds: list[RSSFeedConfig] = []
+    seen_names: set[str] = set()
+    seen_urls: set[str] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError(f"TREND_RSS_FEEDS[{index}] must be an object")
+        name, url, field = value.get("name"), value.get("url"), value.get("field")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            raise ValueError(f"TREND_RSS_FEEDS[{index}].name must contain 1 to 80 characters")
+        if not isinstance(url, str) or len(url) > 2_000:
+            raise ValueError(f"TREND_RSS_FEEDS[{index}].url must be an absolute HTTPS URL")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError(f"TREND_RSS_FEEDS[{index}].url must be an absolute HTTPS URL without credentials or fragment")
+        if not isinstance(field, str) or field not in fields:
+            raise ValueError(f"TREND_RSS_FEEDS[{index}].field must be one of {', '.join(sorted(fields))}")
+        normalized_name = name.strip().casefold()
+        normalized_url = f"{parsed.scheme}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}?{parsed.query}"
+        if normalized_name in seen_names or normalized_url in seen_urls:
+            raise ValueError("TREND_RSS_FEEDS names and URLs must be unique")
+        seen_names.add(normalized_name)
+        seen_urls.add(normalized_url)
+        feeds.append(RSSFeedConfig(name.strip(), url, field))
+    return tuple(feeds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +63,7 @@ class Settings:
     bootstrap_username: str
     bootstrap_password: str
     allowed_private_hosts: tuple[str, ...]
+    trend_rss_feeds: tuple[RSSFeedConfig, ...] = ()
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = ".env") -> "Settings":
@@ -47,6 +92,7 @@ class Settings:
                 for value in os.getenv("ADMIN_ENDPOINT_ALLOWLIST", "").split(",")
                 if value.strip()
             ),
+            trend_rss_feeds=_parse_rss_feeds(os.getenv("TREND_RSS_FEEDS", "[]")),
         )
 
     def validate_runtime(self) -> list[str]:

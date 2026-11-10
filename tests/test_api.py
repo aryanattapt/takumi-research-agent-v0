@@ -12,7 +12,7 @@ from takumi_research_agent.api.app import create_app
 from takumi_research_agent.config import Settings
 from takumi_research_agent.delivery.service import STALE_DISPATCH_AFTER
 from takumi_research_agent.persistence.database import create_database
-from takumi_research_agent.persistence.models import ArticlePairRecord, ArticleVersion, Base, BlogProfile, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, SourceRecord as SourceRecordRow
+from takumi_research_agent.persistence.models import ArticlePairRecord, ArticleVersion, Base, BlogProfile, DeliveryAttempt, DeliveryIntent, EvidenceSpanRecord, GlobalSettings, ProviderProfile, Run, RunEvent, SourceRecord as SourceRecordRow
 from takumi_research_agent.security import SecretCipher
 
 
@@ -305,6 +305,17 @@ def test_run_detail_exposes_agent_trace_claim_links_and_verifiable_quotes():
             status="completed",
             stage="completed",
         ))
+        db.add(RunEvent(
+            run_id="run-detail",
+            event_type="discovery_coverage",
+            details={"coverage": {
+                "window_start": "2026-11-09T10:00:00+00:00",
+                "baseline_start": "2026-11-07T10:00:00+00:00",
+                "observed_at": "2026-11-10T10:00:00+00:00",
+                "candidate_count": 3,
+                "sources": {"rss": {"configured": 1, "successful": 1, "failed": 0, "items": 3, "feeds": []}},
+            }},
+        ))
         db.add(SourceRecordRow(
             id="doi:10.5555/detail",
             url="https://journal.example/detail",
@@ -362,6 +373,8 @@ def test_run_detail_exposes_agent_trace_claim_links_and_verifiable_quotes():
         detail = client.get("/api/v1/runs/run-detail")
         assert detail.status_code == 200
         pair = detail.json()["pair"]
+        assert detail.json()["discovery_coverage"]["candidate_count"] == 3
+        assert detail.json()["discovery_coverage"]["sources"]["rss"]["successful"] == 1
         assert "agent" not in pair["review"]
         assert pair["agent"]["trace"] == [{"type": "tool", "name": "sources.read", "status": "ok"}]
         assert pair["claims"][0]["evidence_ids"] == ["evidence-detail-1"]

@@ -59,7 +59,7 @@ class DailyResearchProcessor:
     def __init__(self, sessions, settings: Settings):
         self.sessions = sessions
         self.settings = settings
-        self.trends = TrendCollector()
+        self.trends = TrendCollector(rss_feeds=settings.trend_rss_feeds, allowed_domains=settings.allowed_domains)
 
     async def close(self) -> None:
         await self.trends.close()
@@ -156,6 +156,18 @@ class DailyResearchProcessor:
                         score_details=item.score_details,
                     )
                 )
+
+    def _record_discovery_coverage(self, run_id: str, coverage: dict[str, Any]) -> None:
+        if not coverage:
+            return
+        with self.sessions.begin() as session:
+            event = session.scalar(
+                select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.event_type == "discovery_coverage")
+            )
+            if event is None:
+                session.add(RunEvent(run_id=run_id, event_type="discovery_coverage", details={"coverage": coverage}))
+            else:
+                event.details = {"coverage": coverage}
 
     def _resume_saved_pair(self, run: Run) -> dict[str, Any] | None:
         """Complete a reclaimed run from its atomic saved pair without repeating model/source work."""
@@ -389,6 +401,7 @@ class DailyResearchProcessor:
             posts = await adapter.list_posts()
             history = self._sync_history(run.blog_id, posts)
             candidates = await self.trends.collect()
+            self._record_discovery_coverage(run.id, getattr(self.trends, "last_coverage", {}))
             self._record_trends(candidates)
             now = datetime.now(timezone.utc)
             enabled_fields = {field for field, enabled in runtime["topic_settings"].items() if enabled}

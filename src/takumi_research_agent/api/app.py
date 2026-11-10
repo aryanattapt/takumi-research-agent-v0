@@ -950,6 +950,12 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
         if run is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
         pair = db.scalar(select(ArticlePairRecord).where(ArticlePairRecord.run_id == run_id))
+        coverage_event = db.scalar(
+            select(RunEvent)
+            .where(RunEvent.run_id == run_id, RunEvent.event_type == "discovery_coverage")
+            .order_by(RunEvent.created_at.desc())
+            .limit(1)
+        )
         review_data = pair.review_result or {} if pair is not None else {}
         source_refs = review_data.get("sources") or []
         evidence_refs = review_data.get("evidence") or []
@@ -1036,6 +1042,7 @@ def create_app(settings: Settings | None = None, *, engine=None, sessions: sessi
             "capacity_state": run.capacity_state,
             "start_by_at": None if run.start_by_at is None else run.start_by_at.isoformat(),
             "schedule_version": run.schedule_version,
+            "discovery_coverage": None if coverage_event is None else coverage_event.details.get("coverage"),
             "deliveries": deliveries,
             "pair": None if pair is None else {
                 "id": pair.id,

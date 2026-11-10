@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import type { ArtifactIntegrity, Blog, CapacityReport, Provider, RecoveryStatus, Run, RunAgentMetrics, RunDetail } from "./types";
+import type { ArtifactIntegrity, Blog, CapacityReport, DiscoveryCoverage, Provider, RecoveryStatus, Run, RunAgentMetrics, RunDetail } from "./types";
 
 type Page = "overview" | "blogs" | "providers" | "runs" | "settings";
 const fields = ["technology", "physics", "chemistry", "biology"] as const;
@@ -376,6 +376,7 @@ function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: str
           <MetricSmall label="Mode" value={detail.execution_mode ?? "dryrun"} /><MetricSmall label="Kapasitas" value={detail.capacity_state ?? "ok"} />
           <MetricSmall label="Mulai paling lambat" value={detail.start_by_at ? new Date(detail.start_by_at).toLocaleString("id-ID") : "—"} />
         </div>
+        {detail.discovery_coverage && <DiscoveryCoveragePanel coverage={detail.discovery_coverage} />}
         {detail.deliveries.length > 0 && <div className="rounded-xl border border-slate-200 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Delivery outbox</p>{detail.execution_mode !== "dryrun" && pendingDelivery && <button className="secondary-button" disabled={dispatching} onClick={() => void dispatchDelivery()}>{dispatching ? "Mengirim…" : "Kirim ke blog"}</button>}</div>
           <div className="mt-3 space-y-2">{detail.deliveries.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs"><span className="font-medium">{item.unit_key}</span><span className="status-pill status-blue">{item.action}</span><span>{item.state}</span><span className="text-slate-500">{item.remote_status ?? "—"} · {item.remote_id ?? "belum ada remote ID"} · {item.attempts} attempt</span>{item.state === "dispatching" && !item.reconciliation_ready && <span className="text-amber-700">Menunggu request selesai sebelum rekonsiliasi.</span>}{item.reconciliation_ready && (item.state === "unknown" || item.state === "dispatching") && <span className="flex gap-2"><button className="font-semibold text-teal-700" onClick={() => void reconcileDelivery(item.id, "succeeded")}>Sukses</button><button className="font-semibold text-rose-700" onClick={() => void reconcileDelivery(item.id, "failed")}>Gagal</button></span>}</div>)}</div>
@@ -390,6 +391,16 @@ function RunsPage({ runs, blogs, csrf }: { runs: Run[]; blogs: Blog[]; csrf: str
         </> : <p className="text-sm text-slate-500">Run ini belum menghasilkan pasangan artikel.</p>}
       </div>
     </Modal>}
+  </section>;
+}
+
+function DiscoveryCoveragePanel({ coverage }: { coverage: DiscoveryCoverage }) {
+  const labels: Record<string, string> = { hackernews: "Hacker News", arxiv: "arXiv", rss: "RSS" };
+  return <section className="rounded-xl border border-slate-200 p-4">
+    <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold">Coverage discovery</h3><p className="mt-1 text-xs text-slate-500">{coverage.candidate_count} kandidat dalam 24 jam terakhir · diamati {new Date(coverage.observed_at).toLocaleString("id-ID")}</p><p className="mt-1 text-xs text-slate-500">Baseline Hacker News dihitung dari {new Date(coverage.baseline_start).toLocaleString("id-ID")}.</p></div><span className="status-pill status-gray">Jendela dari {new Date(coverage.window_start).toLocaleString("id-ID")}</span></div>
+    <div className="mt-3 grid gap-2 sm:grid-cols-3">{Object.entries(coverage.sources).map(([key, source]) => <div key={key} className="rounded-lg bg-slate-50 p-3 text-xs"><p className="font-semibold">{labels[key] ?? key}</p><p className="mt-1 text-slate-600">{source.successful}/{source.configured} sukses · {source.failed} gagal · {source.hits ?? source.items ?? 0} record</p>
+      {source.feeds?.map((feed) => <p key={feed.name} className="mt-2 border-t border-slate-200 pt-2 text-slate-500">{feed.name}: {feed.status} · {feed.items} item{feed.error ? ` · ${feed.error}` : ""}</p>)}
+    </div>)}</div>
   </section>;
 }
 

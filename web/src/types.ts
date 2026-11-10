@@ -110,6 +110,30 @@ export type RunAgentMetrics = {
   trace?: AgentTraceEvent[];
 };
 
+export type DiscoveryFeedCoverage = {
+  name: string;
+  status: "ok" | "not_modified" | "failed" | string;
+  items: number;
+  error?: string;
+};
+
+export type DiscoverySourceCoverage = {
+  configured: number;
+  successful: number;
+  failed: number;
+  hits?: number;
+  items?: number;
+  feeds?: DiscoveryFeedCoverage[];
+};
+
+export type DiscoveryCoverage = {
+  window_start: string;
+  baseline_start: string;
+  observed_at: string;
+  candidate_count: number;
+  sources: Record<string, DiscoverySourceCoverage>;
+};
+
 export type RunDetail = {
   id: string;
   blog_id: string;
@@ -123,6 +147,7 @@ export type RunDetail = {
   capacity_state: string;
   start_by_at: string | null;
   schedule_version: number;
+  discovery_coverage: DiscoveryCoverage | null;
   deliveries: Array<Record<string, any>>;
   pair: {
     id: string;
