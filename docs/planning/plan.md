@@ -1004,6 +1004,8 @@ Tooling sekarang mencakup CLI read-only untuk menjalankan research agent secara 
 
 Dataset benchmark yang di-commit tetap kosong dan harus diisi reviewer manusia. Runbook deployment/backup/recovery tersedia sebagai langkah operasional; restore rehearsal pada deployment nyata masih belum dilakukan. Provider credentials, limit, dan hasil qualification juga belum tersedia.
 
+Perbaikan tooling evaluasi pada 11 November 2026: evaluator retrieval sekarang mendukung skor development tanpa melabelinya qualified, menolak hasil yang fingerprint dataset-nya tidak cocok, dan memeriksa bahwa semua ID hasil benar-benar berasal dari corpus benchmark. Importer opsional untuk MIRACL Indonesian `dev` menyiapkan 40 query retrieval/ranking development dari export lokal dan tidak mengisi dedup atau holdout internal. Kualifikasi riset kini mensyaratkan 40 kasus holdout dengan minimal 10 kasus per bidang, dan menolak angka metrik pecahan. Belum ada export data, hasil model nyata, label dedup silang bahasa, atau kualifikasi holdout yang dihasilkan.
+
 Verifikasi lokal saat ini menjalankan unit/API tests dan production build dashboard. Hasil pass bukan pengganti evaluasi kualitas model atau UAT live. Untuk keadaan rilis paling baru, lihat README dan hasil commit implementasi.
 
 Keputusan keselamatan untuk versi ini: semua run menyimpan artikel secara lokal; tidak ada jalur otomatis yang menulis ke API blog. Setelah kontrak API tersedia, capability create-draft/publish, lookup/reconciliation, idempotency, dan hasil remote perlu dibuktikan sebelum melepas gate tersebut.

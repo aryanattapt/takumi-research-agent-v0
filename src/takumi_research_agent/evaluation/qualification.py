@@ -34,6 +34,21 @@ TRIAL_METRICS = (
 )
 
 
+def _is_nonnegative_metric(name: str, value: Any) -> bool:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return False
+    return 1 <= value <= 5 if name == "reader_score" else True
+
+
+def _has_reviewer_ids(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(reviewer, str) and reviewer.strip() for reviewer in value)
+        and len(set(value)) == len(value)
+    )
+
+
 def read_json(path: str | Path) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -81,27 +96,36 @@ def _dataset_errors(dataset: dict[str, Any], *, minimum_cases: int = 40) -> tupl
             errors.append(f"cases[{index}] needs at least one source snapshot")
         else:
             for source_index, source in enumerate(sources):
-                parsed_url = urlsplit(source["url"]) if isinstance(source, dict) and isinstance(source.get("url"), str) else None
-                if source is None or not isinstance(source, dict) or parsed_url is None or parsed_url.scheme != "https" or not parsed_url.hostname or parsed_url.username or parsed_url.password or not isinstance(source.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", source["sha256"]):
+                try:
+                    parsed_url = urlsplit(source["url"]) if isinstance(source, dict) and isinstance(source.get("url"), str) else None
+                    valid_host = parsed_url is not None and bool(parsed_url.hostname)
+                except ValueError:
+                    parsed_url, valid_host = None, False
+                if source is None or not isinstance(source, dict) or parsed_url is None or parsed_url.scheme != "https" or not valid_host or parsed_url.username or parsed_url.password or not isinstance(source.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", source["sha256"]):
                     errors.append(f"cases[{index}].source_snapshots[{source_index}] needs a URL and 64-character sha256")
         adjudication = case.get("adjudication")
         if not isinstance(adjudication, dict) or adjudication.get("adjudicated") is not True:
             errors.append(f"cases[{index}] needs a human adjudication")
         else:
-            if not isinstance(adjudication.get("reviewers"), list) or not adjudication["reviewers"]:
+            if not _has_reviewer_ids(adjudication.get("reviewers")):
                 errors.append(f"cases[{index}].adjudication needs reviewer IDs")
             if adjudication.get("decision") not in {"pass", "fail", "uncertain"}:
                 errors.append(f"cases[{index}].adjudication.decision must be pass, fail, or uncertain")
+            elif case.get("split") == "holdout" and adjudication["decision"] == "uncertain":
+                errors.append(f"cases[{index}] with uncertain adjudication cannot be used in holdout")
         gold = case.get("gold")
         if not isinstance(gold, dict):
             errors.append(f"cases[{index}].gold is required")
         else:
             for metric in TRIAL_METRICS:
                 value = gold.get(metric)
-                if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-                    errors.append(f"cases[{index}].gold.{metric} must be a non-negative number")
-            if isinstance(gold.get("reader_score"), (int, float)) and not 1 <= gold["reader_score"] <= 5:
-                errors.append(f"cases[{index}].gold.reader_score must be 1..5")
+                if not _is_nonnegative_metric(metric, value):
+                    expected = "an integer from 1 to 5" if metric == "reader_score" else "a non-negative integer"
+                    errors.append(f"cases[{index}].gold.{metric} must be {expected}")
+            if all(isinstance(gold.get(name), int) and not isinstance(gold.get(name), bool) for name in ("supported_citations", "citation_total")) and gold["supported_citations"] > gold["citation_total"]:
+                errors.append(f"cases[{index}].gold.supported_citations cannot exceed citation_total")
+            if all(isinstance(gold.get(name), int) and not isinstance(gold.get(name), bool) for name in ("numeric_date_unit_parity_failures", "numeric_date_unit_parity_checks")) and gold["numeric_date_unit_parity_failures"] > gold["numeric_date_unit_parity_checks"]:
+                errors.append(f"cases[{index}].gold parity failures cannot exceed parity checks")
     for field in sorted(FIELDS):
         if counts[field] < 10:
             errors.append(f"field {field} has {counts[field]} cases; minimum is 10")
@@ -114,7 +138,7 @@ def _validate_trial(trial: dict[str, Any], *, case_ids: set[str], dataset_versio
     errors = []
     case_id = trial.get("case_id")
     execution_status = trial.get("execution_status")
-    if execution_status is not None and execution_status != "completed":
+    if execution_status != "completed":
         errors.append(f"trial {case_id!r} did not produce a completed research bundle")
     if case_id not in case_ids:
         errors.append(f"trial references unknown case_id {case_id!r}")
@@ -127,17 +151,16 @@ def _validate_trial(trial: dict[str, Any], *, case_ids: set[str], dataset_versio
     if metadata.get("dataset_version") != dataset_version:
         errors.append(f"trial {case_id!r} uses a different dataset_version")
     evaluation = trial.get("evaluation")
-    if not isinstance(evaluation, dict) or evaluation.get("adjudicated") is not True or not isinstance(evaluation.get("reviewers"), list) or not evaluation["reviewers"]:
+    if not isinstance(evaluation, dict) or evaluation.get("adjudicated") is not True or not _has_reviewer_ids(evaluation.get("reviewers")):
         errors.append(f"trial {case_id!r} needs independent human evaluation and reviewer IDs")
     metrics = trial.get("metrics")
     if not isinstance(metrics, dict):
         return errors + [f"trial {case_id!r} needs metrics"]
     for name in TRIAL_METRICS:
         value = metrics.get(name)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-            errors.append(f"trial {case_id!r} metrics.{name} must be a non-negative number")
-    if isinstance(metrics.get("reader_score"), (int, float)) and not 1 <= metrics["reader_score"] <= 5:
-        errors.append(f"trial {case_id!r} reader_score must be 1..5")
+        if not _is_nonnegative_metric(name, value):
+            expected = "an integer from 1 to 5" if name == "reader_score" else "a non-negative integer"
+            errors.append(f"trial {case_id!r} metrics.{name} must be {expected}")
     if all(isinstance(metrics.get(name), (int, float)) for name in ("supported_citations", "citation_total")) and metrics["supported_citations"] > metrics["citation_total"]:
         errors.append(f"trial {case_id!r} supported_citations cannot exceed citation_total")
     if all(isinstance(metrics.get(name), (int, float)) for name in ("numeric_date_unit_parity_failures", "numeric_date_unit_parity_checks")) and metrics["numeric_date_unit_parity_failures"] > metrics["numeric_date_unit_parity_checks"]:
@@ -159,12 +182,22 @@ def qualify_research_dataset(
     model-generated trial summaries supplied by an evaluator.
     """
     errors, cases = _dataset_errors(dataset, minimum_cases=minimum_cases)
+    if minimum_cases < 1:
+        errors.append("minimum_cases must be positive")
+    if trials_per_case < 1:
+        errors.append("trials_per_case must be positive")
     dataset_version = dataset.get("dataset_version")
     holdout_ids = {case.get("case_id") for case in cases if case.get("split") == "holdout" and isinstance(case.get("case_id"), str)}
-    holdout_counts = Counter(case.get("field") for case in cases if case.get("split") == "holdout")
+    holdout_counts = Counter(
+        case.get("field") if isinstance(case.get("field"), str) else None
+        for case in cases
+        if case.get("split") == "holdout"
+    )
+    if len(holdout_ids) < minimum_cases:
+        errors.append(f"holdout has {len(holdout_ids)} cases; minimum is {minimum_cases}")
     for field in sorted(FIELDS):
-        if holdout_counts[field] < 1:
-            errors.append(f"holdout has no case for field {field}")
+        if holdout_counts[field] < 10:
+            errors.append(f"holdout field {field} has {holdout_counts[field]} cases; minimum is 10")
     case_ids = {case.get("case_id") for case in cases if isinstance(case.get("case_id"), str)}
     trials = trials_document.get("trials")
     if trials_document.get("schema_version") != 1:
@@ -206,7 +239,7 @@ def qualify_research_dataset(
     metric_errors = [
         trial
         for trial in holdout_trials
-        if any(not isinstance(trial["metrics"].get(name), (int, float)) or isinstance(trial["metrics"].get(name), bool) for name in TRIAL_METRICS)
+        if any(not _is_nonnegative_metric(name, trial["metrics"].get(name)) for name in TRIAL_METRICS)
     ]
     if metric_errors:
         holdout_trials = [trial for trial in holdout_trials if trial not in metric_errors]

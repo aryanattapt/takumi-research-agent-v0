@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "dataset_version": "history-retrieval-v1.0.0",
+  "dataset_fingerprint": "",
   "metadata": {
     "retriever_version": "",
     "index_version": "",
