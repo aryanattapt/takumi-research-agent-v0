@@ -9,6 +9,7 @@ from pathlib import Path
 
 from takumi_research_agent.config import Settings
 
+from .miracl_import import import_miracl_jsonl
 from .qualification import calibrate_reviewers, qualify_research_dataset, read_json
 from .research_runner import (
     _atomic_write_json,
@@ -28,11 +29,18 @@ def main() -> int:
     research = subparsers.add_parser("research", help="qualify labeled research/evidence holdout trials")
     research.add_argument("--dataset", required=True)
     research.add_argument("--trials", required=True)
-    research.add_argument("--minimum-cases", type=int, default=40)
+    research.add_argument("--minimum-cases", type=int, default=40, help="minimum human-labeled holdout cases required to qualify (default: 40)")
     research.add_argument("--trials-per-case", type=int, default=3)
     retrieval = subparsers.add_parser("retrieval", help="score labeled history retrieval, ranking, and dedup")
     retrieval.add_argument("--dataset", required=True)
     retrieval.add_argument("--results", required=True)
+    miracl_import = subparsers.add_parser(
+        "import-miracl-dev",
+        help="convert a locally exported Indonesian MIRACL dev JSONL file into a development-only retrieval dataset",
+    )
+    miracl_import.add_argument("--input-jsonl", required=True, help="JSONL rows with query_id/query/positive_passages/negative_passages")
+    miracl_import.add_argument("--output", required=True)
+    miracl_import.add_argument("--case-limit", type=int, default=40)
     reviewer = subparsers.add_parser("reviewer", help="measure reviewer agreement against adjudication")
     reviewer.add_argument("--dataset", required=True)
     reviewer.add_argument("--labels", required=True)
@@ -96,6 +104,24 @@ def main() -> int:
     run_semantic.add_argument("--code-revision")
 
     args = parser.parse_args()
+
+    if args.suite == "import-miracl-dev":
+        try:
+            dataset = import_miracl_jsonl(args.input_jsonl, case_limit=args.case_limit)
+        except (TypeError, ValueError, OSError) as exc:
+            print(json.dumps({"status": "incomplete", "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 2
+        _atomic_write_json(Path(args.output), dataset)
+        case_counts = {kind: sum(case["kind"] == kind for case in dataset["cases"]) for kind in ("retrieval", "ranking")}
+        print(json.dumps({
+            "status": "development_dataset_created",
+            "dataset_version": dataset["dataset_version"],
+            "corpus_documents": len(dataset["corpus"]),
+            "case_counts": case_counts,
+            "output": str(Path(args.output).expanduser().resolve()),
+            "qualification": "development-only; this dataset cannot qualify a release",
+        }, ensure_ascii=False, indent=2))
+        return 0
 
     if args.suite == "run-research":
         settings = Settings.from_env()
@@ -225,7 +251,7 @@ def main() -> int:
         exit_code = 0 if report["qualified"] else 2
     elif args.suite == "retrieval":
         report = evaluate_retrieval_benchmark(dataset, read_json(args.results))
-        exit_code = 0 if report["qualified"] else 2
+        exit_code = 0 if report["status"] in {"qualified", "development_scored"} else 2
     else:
         labels_document = read_json(args.labels)
         adjudicated = {
